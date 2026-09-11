@@ -1,5 +1,6 @@
 #include "ft232Usbd.h"
 
+#include "GPIO_Cfg.h"
 #include "debug.h"
 #include "ft232Descriptor.h"
 #include "usb_lib.h"
@@ -7,20 +8,18 @@
 #define USB_REQUEST_DIRECTION_IN       (0x80U)
 #define USB_VENDOR_HOST_TO_DEVICE      (0x40U)
 #define USB_VENDOR_DEVICE_TO_HOST      (0xC0U)
+#define USB_CLASS_INTERFACE_OUT        (0x21U)
+#define USB_CLASS_INTERFACE_IN         (0xA1U)
 #define USB_LANGUAGE_ID_EN_US_LOW      (0x09U)
 #define USB_LANGUAGE_ID_EN_US_HIGH     (0x04U)
 #define FTDI_DEFAULT_LATENCY_TIMER      (16U)
 #define FT232_USBD_JTAG_CHANNEL         (0U)
 #define FT232_USBD_AUX_CHANNEL          (1U)
 
-/* CFGHR 每个引脚占 4 位：0x3=50 MHz 推挽输出，0x4=浮空输入。 */
-#define USBD_PA11_PA12_CFG_MASK        (0x000FF000UL)
-#define USBD_PA11_PA12_OUTPUT_LOW      (0x00033000UL)
-#define USBD_PA11_PA12_FLOATING_INPUT  (0x00044000UL)
-#define USBD_PA11_PA12_PIN_MASK        ((uint32_t)GPIO_Pin_11 | (uint32_t)GPIO_Pin_12)
 #define USBD_ENDPOINT_RESET_MASK       (0x7F7FU)
 #define USBD_EP0_RX_BLOCK_MASK         (0xFC00U)
 #define USBD_PMA_SIZE                  (0x0200U)
+#define FT232_USBD_MPSSE_IDLE_STATUS_DELAY_TICKS (7200000UL)
 #define FT232_USBD_FLASH __attribute__((section(".rodata.usbd")))
 
 static const Ft232UsbdConfig ft232_usbd_config FT232_USBD_FLASH = {
@@ -30,7 +29,8 @@ static const Ft232UsbdConfig ft232_usbd_config FT232_USBD_FLASH = {
         .NVIC_IRQChannelPreemptionPriority = 1U,
         .NVIC_IRQChannelSubPriority = 0U,
         .NVIC_IRQChannelCmd = ENABLE
-    }
+    },
+    .gpio = &GpioCfg0
 };
 
 static Ft232UsbdState ft232_usbd_state;
@@ -48,6 +48,9 @@ static RESULT ft232_usbd_data_setup(uint8_t request);
 static RESULT ft232_usbd_no_data_setup(uint8_t request);
 static RESULT ft232_usbd_ftdi_data_setup(uint8_t request);
 static RESULT ft232_usbd_ftdi_no_data_setup(uint8_t request);
+static RESULT ft232_usbd_cdc_data_setup(uint8_t request);
+static RESULT ft232_usbd_cdc_no_data_setup(uint8_t request);
+static void ft232_usbd_cdc_fixed_line_coding(Ft232UsbdState *state);
 static RESULT ft232_usbd_get_interface_setting(uint8_t interface,
                                                 uint8_t alternate_setting);
 static uint8_t *ft232_usbd_get_control_reply(uint16_t length);
@@ -62,6 +65,8 @@ static void ft232_usbd_ep1_in(void);
 static void ft232_usbd_ep2_out(void);
 static void ft232_usbd_ep3_in(void);
 static void ft232_usbd_ep4_out(void);
+static void ft232_usbd_ep6_out(void);
+static void ft232_usbd_ep7_in(void);
 static void ft232_usbd_port_set(uint8_t connected);
 static void ft232_usbd_interrupt_service(void);
 static Ft232UsbdChannelState *ft232_usbd_request_channel(Ft232UsbdState *state,
@@ -87,6 +92,8 @@ static void ft232_usbd_cancel_data(Ft232UsbdState *state);
 static void ft232_usbd_cancel_channel(Ft232UsbdChannelState *channel);
 static void ft232_usbd_purge_device_in(Ft232UsbdChannelState *channel,
                                        uint8_t endpoint);
+static void ft232_usbd_cancel_cdc(Ft232UsbdCdcState *cdc);
+static uint32_t ft232_usbd_systick_low(void);
 
 static const ONE_DESCRIPTOR ft232_device_descriptor FT232_USBD_FLASH = {
     (uint8_t *)FtdiUsbDeviceDescriptor,
@@ -169,12 +176,12 @@ __IO uint16_t wIstr;
 /* 数组必须覆盖库可分发的所有端点，未发布的端点仍明确落到空处理。 */
 void (*pEpInt_IN[7])(void) = {
     ft232_usbd_ep1_in, NOP_Process, ft232_usbd_ep3_in, NOP_Process,
-    NOP_Process, NOP_Process, NOP_Process
+    NOP_Process, NOP_Process, ft232_usbd_ep7_in
 };
 
 void (*pEpInt_OUT[7])(void) = {
     NOP_Process, ft232_usbd_ep2_out, NOP_Process, ft232_usbd_ep4_out,
-    NOP_Process, NOP_Process, NOP_Process
+    NOP_Process, ft232_usbd_ep6_out, NOP_Process
 };
 
 void Ft232Usbd_Init(const Ft232Usbd *const self)
@@ -199,10 +206,18 @@ void Ft232Usbd_Init(const Ft232Usbd *const self)
     state->host_rx_purge_event = 0U;
     state->host_tx_purge_event = 0U;
     state->fault = FT232_USBD_FAULT_NONE;
+    state->cdc.out_length = 0U;
+    state->cdc.out_produced = 0U;
+    state->cdc.out_consumed = 0U;
+    state->cdc.in_produced = 0U;
+    state->cdc.in_consumed = 0U;
+    state->cdc.data_enabled = 0U;
+    state->cdc.fault = FT232_USBD_CDC_FAULT_NONE;
+    state->mpsse_idle_started_at = 0U;
+    state->mpsse_idle_status_pending = 0U;
 
     RCC_USBCLKConfig(self->config->usb_clock_source);
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_USB, ENABLE);
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
 
     USB_Init();
 }
@@ -231,6 +246,46 @@ void Ft232Usbd_DataEnable(const Ft232Usbd *const self)
     {
         SetEPRxCount(ENDP4, FTDI_USB_BULK_PACKET_SIZE);
         SetEPRxValid(ENDP4);
+    }
+    Ft232Usbd_InterruptUnlock(self, irq_was_enabled);
+}
+
+void Ft232Usbd_MpsseService(const Ft232Usbd *const self)
+{
+    Ft232UsbdState *const state = self->state;
+    Ft232UsbdChannelState *const channel =
+        &state->channel[FT232_USBD_JTAG_CHANNEL];
+    uint8_t irq_was_enabled;
+
+    if (state->mpsse_idle_status_pending == 0U)
+    {
+        return;
+    }
+    if ((uint32_t)(ft232_usbd_systick_low() - state->mpsse_idle_started_at) <
+        FT232_USBD_MPSSE_IDLE_STATUS_DELAY_TICKS)
+    {
+        return;
+    }
+
+    irq_was_enabled = Ft232Usbd_InterruptLock(self);
+    if ((state->mpsse_idle_status_pending != 0U) &&
+        (state->configured != 0U) &&
+        (state->data_enabled != 0U) &&
+        (channel->bit_mode == FTDI_SIO_BITMODE_MPSSE) &&
+        (channel->in_produced == channel->in_consumed))
+    {
+        /* openFPGALoader 进入 MPSSE 后会先读后写。真 FT2232 在 latency
+         * 到期时返回只有 31 60 的状态包；延迟到 50 ms 再补这一包，使立即
+         * 发送同步命令的 Gowin 路径优先占用 EP1，避免空包抢在有效回复前。
+         */
+        state->mpsse_in_packet[0] = FTDI_USB_MODEM_STATUS;
+        state->mpsse_in_packet[1] = FTDI_USB_LINE_STATUS;
+        (void)USB_SIL_Write(FTDI_USB_JTAG_IN_EP, state->mpsse_in_packet,
+                            FTDI_USB_STATUS_SIZE);
+        __asm volatile ("" ::: "memory");
+        channel->in_produced++;
+        state->mpsse_idle_status_pending = 0U;
+        SetEPTxValid(ENDP1);
     }
     Ft232Usbd_InterruptUnlock(self, irq_was_enabled);
 }
@@ -314,6 +369,99 @@ Ft232UsbdResult Ft232Usbd_AuxTxWrite(const Ft232Usbd *const self,
                                FTDI_USB_AUX_IN_EP, ENDP3, data, length);
 }
 
+void Ft232Usbd_CdcDataEnable(const Ft232Usbd *const self)
+{
+    Ft232UsbdCdcState *const cdc = &self->state->cdc;
+    const uint8_t irq_was_enabled = Ft232Usbd_InterruptLock(self);
+
+    cdc->data_enabled = 1U;
+    if ((self->state->configured != 0U) &&
+        (cdc->out_produced == cdc->out_consumed))
+    {
+        SetEPRxCount(ENDP6, FTDI_USB_CDC_DATA_PACKET_SIZE);
+        SetEPRxValid(ENDP6);
+    }
+    Ft232Usbd_InterruptUnlock(self, irq_was_enabled);
+}
+
+uint8_t Ft232Usbd_CdcIsReady(const Ft232Usbd *const self)
+{
+    return ((self->state->configured != 0U) &&
+            (self->state->cdc.data_enabled != 0U)) ? 1U : 0U;
+}
+
+Ft232UsbdCdcFault Ft232Usbd_CdcGetFault(const Ft232Usbd *const self)
+{
+    return (Ft232UsbdCdcFault)self->state->cdc.fault;
+}
+
+uint16_t Ft232Usbd_CdcRxPeek(const Ft232Usbd *const self,
+                             const uint8_t **const data)
+{
+    const Ft232UsbdCdcState *const cdc = &self->state->cdc;
+
+    if (cdc->out_produced == cdc->out_consumed)
+    {
+        *data = (const uint8_t *)0;
+        return 0U;
+    }
+    __asm volatile ("" ::: "memory");
+    *data = cdc->out_data;
+    return cdc->out_length;
+}
+
+void Ft232Usbd_CdcRxConsume(const Ft232Usbd *const self)
+{
+    Ft232UsbdCdcState *const cdc = &self->state->cdc;
+    const uint8_t irq_was_enabled = Ft232Usbd_InterruptLock(self);
+
+    cdc->out_consumed = cdc->out_produced;
+    cdc->out_length = 0U;
+    if ((self->state->configured != 0U) && (cdc->data_enabled != 0U))
+    {
+        SetEPRxCount(ENDP6, FTDI_USB_CDC_DATA_PACKET_SIZE);
+        SetEPRxValid(ENDP6);
+    }
+    Ft232Usbd_InterruptUnlock(self, irq_was_enabled);
+}
+
+Ft232UsbdResult Ft232Usbd_CdcTxWrite(const Ft232Usbd *const self,
+                                     const uint8_t *const data,
+                                     uint16_t length)
+{
+    Ft232UsbdCdcState *const cdc = &self->state->cdc;
+    Ft232UsbdResult result = FT232_USBD_OK;
+    uint8_t irq_was_enabled;
+
+    if ((length == 0U) || (length > FTDI_USB_CDC_DATA_PACKET_SIZE))
+    {
+        return FT232_USBD_INVALID_LENGTH;
+    }
+    if (data == (const uint8_t *)0)
+    {
+        return FT232_USBD_INVALID_DATA;
+    }
+
+    irq_was_enabled = Ft232Usbd_InterruptLock(self);
+    if ((self->state->configured == 0U) || (cdc->data_enabled == 0U))
+    {
+        result = FT232_USBD_NOT_CONFIGURED;
+    }
+    else if (cdc->in_produced != cdc->in_consumed)
+    {
+        result = FT232_USBD_TX_BUSY;
+    }
+    else
+    {
+        (void)USB_SIL_Write(FTDI_USB_CDC_DATA_IN_EP, (uint8_t *)data, length);
+        __asm volatile ("" ::: "memory");
+        cdc->in_produced++;
+        SetEPTxValid(ENDP7);
+    }
+    Ft232Usbd_InterruptUnlock(self, irq_was_enabled);
+    return result;
+}
+
 static void ft232_usbd_device_init(void)
 {
     uint8_t endpoint;
@@ -349,6 +497,8 @@ static void ft232_usbd_reset(void)
 
     state->configured = 0U;
     ft232_usbd_cancel_data(state);
+    ft232_usbd_cancel_cdc(&state->cdc);
+    state->mpsse_idle_status_pending = 0U;
     state->bus_reset_event++;
 
     SetBTABLE(BTABLE_ADDRESS);
@@ -395,6 +545,33 @@ static void ft232_usbd_reset(void)
     ClearDTOG_RX(ENDP4);
     ClearDTOG_TX(ENDP4);
 
+    /* CDC 端点在 reset 时只完成静态建表；转发服务 enable 后，
+     * SET_CONFIGURATION 才把空闲 EP6 切成 VALID。
+     */
+    SetEPType(ENDP5, EP_INTERRUPT);
+    SetEPTxAddr(ENDP5, ENDP5_TXADDR);
+    SetEPTxCount(ENDP5, 0U);
+    SetEPTxStatus(ENDP5, EP_TX_DIS);
+    SetEPRxStatus(ENDP5, EP_RX_DIS);
+    ClearDTOG_RX(ENDP5);
+    ClearDTOG_TX(ENDP5);
+
+    SetEPType(ENDP6, EP_BULK);
+    SetEPRxAddr(ENDP6, ENDP6_RXADDR);
+    SetEPRxCount(ENDP6, FTDI_USB_CDC_DATA_PACKET_SIZE);
+    SetEPTxStatus(ENDP6, EP_TX_DIS);
+    SetEPRxStatus(ENDP6, EP_RX_DIS);
+    ClearDTOG_RX(ENDP6);
+    ClearDTOG_TX(ENDP6);
+
+    SetEPType(ENDP7, EP_BULK);
+    SetEPTxAddr(ENDP7, ENDP7_TXADDR);
+    SetEPTxCount(ENDP7, 0U);
+    SetEPTxStatus(ENDP7, EP_TX_DIS);
+    SetEPRxStatus(ENDP7, EP_RX_DIS);
+    ClearDTOG_RX(ENDP7);
+    ClearDTOG_TX(ENDP7);
+
     SetDeviceAddress(0U);
 }
 
@@ -428,6 +605,11 @@ static RESULT ft232_usbd_data_setup(uint8_t request)
     {
         copy_routine = ft232_usbd_get_ms_os_20_descriptor;
     }
+    else if ((pInformation->USBbmRequestType == USB_CLASS_INTERFACE_IN) ||
+             (pInformation->USBbmRequestType == USB_CLASS_INTERFACE_OUT))
+    {
+        return ft232_usbd_cdc_data_setup(request);
+    }
     else if (pInformation->USBbmRequestType == USB_VENDOR_DEVICE_TO_HOST)
     {
         return ft232_usbd_ftdi_data_setup(request);
@@ -445,6 +627,11 @@ static RESULT ft232_usbd_data_setup(uint8_t request)
 
 static RESULT ft232_usbd_no_data_setup(uint8_t request)
 {
+    if (pInformation->USBbmRequestType == USB_CLASS_INTERFACE_OUT)
+    {
+        return ft232_usbd_cdc_no_data_setup(request);
+    }
+
     if ((pInformation->USBbmRequestType != USB_VENDOR_HOST_TO_DEVICE) ||
         (pInformation->USBwLength != 0U))
     {
@@ -452,6 +639,81 @@ static RESULT ft232_usbd_no_data_setup(uint8_t request)
     }
 
     return ft232_usbd_ftdi_no_data_setup(request);
+}
+
+static RESULT ft232_usbd_cdc_data_setup(uint8_t request)
+{
+    Ft232UsbdState *const state = Ft232Usbd0.state;
+
+    if ((pInformation->USBwIndex0 != FTDI_USB_CDC_CONTROL_INTERFACE_NUMBER) ||
+        (pInformation->USBwIndex1 != 0U) ||
+        (pInformation->USBwValue != 0U) ||
+        (pInformation->USBwLength != FTDI_USB_CDC_LINE_CODING_SIZE))
+    {
+        return USB_UNSUPPORT;
+    }
+
+    if ((request == FTDI_USB_CDC_GET_LINE_CODING_REQUEST) &&
+        (pInformation->USBbmRequestType == USB_CLASS_INTERFACE_IN))
+    {
+        ft232_usbd_cdc_fixed_line_coding(state);
+    }
+    else if ((request == FTDI_USB_CDC_SET_LINE_CODING_REQUEST) &&
+             (pInformation->USBbmRequestType == USB_CLASS_INTERFACE_OUT))
+    {
+        /* 必须接完 7 字节 OUT data stage 才能合法 ACK；内容只落在 EP0
+         * 临时槽中，不成为 UART 配置的第二事实来源。
+         */
+        state->control_reply_length = FTDI_USB_CDC_LINE_CODING_SIZE;
+    }
+    else
+    {
+        return USB_UNSUPPORT;
+    }
+
+    pInformation->Ctrl_Info.Usb_wOffset = 0U;
+    pInformation->Ctrl_Info.CopyData = ft232_usbd_get_control_reply;
+    ft232_usbd_get_control_reply(0U);
+    return USB_SUCCESS;
+}
+
+static RESULT ft232_usbd_cdc_no_data_setup(uint8_t request)
+{
+    if ((pInformation->USBwIndex0 != FTDI_USB_CDC_CONTROL_INTERFACE_NUMBER) ||
+        (pInformation->USBwIndex1 != 0U) ||
+        (pInformation->USBwLength != 0U))
+    {
+        return USB_UNSUPPORT;
+    }
+
+    if (request == FTDI_USB_CDC_SET_CONTROL_LINE_STATE_REQUEST)
+    {
+        /* DTR/RTS 尚未接到 UART；只允许规范定义的低两位后 ACK。 */
+        return ((pInformation->USBwValue1 == 0U) &&
+                ((pInformation->USBwValue0 & 0xFCU) == 0U))
+                   ? USB_SUCCESS : USB_UNSUPPORT;
+    }
+    if (request == FTDI_USB_CDC_SEND_BREAK_REQUEST)
+    {
+        return USB_SUCCESS;
+    }
+    return USB_UNSUPPORT;
+}
+
+static void ft232_usbd_cdc_fixed_line_coding(Ft232UsbdState *const state)
+{
+    state->control_reply[0] =
+        (uint8_t)(UART_FORWARD_BAUD_RATE & 0xFFUL);
+    state->control_reply[1] =
+        (uint8_t)((UART_FORWARD_BAUD_RATE >> 8U) & 0xFFUL);
+    state->control_reply[2] =
+        (uint8_t)((UART_FORWARD_BAUD_RATE >> 16U) & 0xFFUL);
+    state->control_reply[3] =
+        (uint8_t)((UART_FORWARD_BAUD_RATE >> 24U) & 0xFFUL);
+    state->control_reply[4] = UART_FORWARD_STOP_BITS;
+    state->control_reply[5] = UART_FORWARD_PARITY;
+    state->control_reply[6] = UART_FORWARD_DATA_BITS;
+    state->control_reply_length = FTDI_USB_CDC_LINE_CODING_SIZE;
 }
 
 static RESULT ft232_usbd_ftdi_data_setup(uint8_t request)
@@ -573,6 +835,10 @@ static RESULT ft232_usbd_ftdi_no_data_setup(uint8_t request)
         if (pInformation->USBwValue0 == (uint8_t)FTDI_SIO_RESET_SIO)
         {
             ft232_usbd_cancel_channel(channel);
+            if (channel_number == FT232_USBD_JTAG_CHANNEL)
+            {
+                state->mpsse_idle_status_pending = 0U;
+            }
             SetEPTxStatus(in_endpoint, EP_TX_NAK);
             if ((state->configured != 0U) && (state->data_enabled != 0U))
             {
@@ -629,6 +895,10 @@ static RESULT ft232_usbd_ftdi_no_data_setup(uint8_t request)
         ft232_usbd_purge_device_in(channel, in_endpoint);
         if (channel_number == FT232_USBD_JTAG_CHANNEL)
         {
+            state->mpsse_idle_started_at = ft232_usbd_systick_low();
+            __asm volatile ("" ::: "memory");
+            state->mpsse_idle_status_pending =
+                (pInformation->USBwValue1 == FTDI_SIO_BITMODE_MPSSE) ? 1U : 0U;
             state->sio_reset_event++;
         }
         return USB_SUCCESS;
@@ -651,7 +921,8 @@ static RESULT ft232_usbd_ftdi_no_data_setup(uint8_t request)
 static RESULT ft232_usbd_get_interface_setting(uint8_t interface,
                                                 uint8_t alternate_setting)
 {
-    if ((interface >= FTDI_USB_INTERFACE_COUNT) || (alternate_setting != 0U))
+    if ((interface >= FTDI_USB_TOTAL_INTERFACE_COUNT) ||
+        (alternate_setting != 0U))
     {
         return USB_UNSUPPORT;
     }
@@ -737,6 +1008,18 @@ static void ft232_usbd_set_configuration(void)
         state->configured = 1U;
         SetEPTxStatus(ENDP1, EP_TX_NAK);
         SetEPTxStatus(ENDP3, EP_TX_NAK);
+        SetEPTxStatus(ENDP5, EP_TX_NAK);
+        if ((state->cdc.data_enabled != 0U) &&
+            (state->cdc.out_produced == state->cdc.out_consumed))
+        {
+            SetEPRxCount(ENDP6, FTDI_USB_CDC_DATA_PACKET_SIZE);
+            SetEPRxValid(ENDP6);
+        }
+        else
+        {
+            SetEPRxStatus(ENDP6, EP_RX_NAK);
+        }
+        SetEPTxStatus(ENDP7, EP_TX_NAK);
         if ((state->data_enabled != 0U) &&
             (state->channel[FT232_USBD_JTAG_CHANNEL].out_produced ==
              state->channel[FT232_USBD_JTAG_CHANNEL].out_consumed))
@@ -767,11 +1050,16 @@ static void ft232_usbd_set_configuration(void)
             state->sio_reset_event++;
         }
         state->configured = 0U;
+        state->mpsse_idle_status_pending = 0U;
         ft232_usbd_cancel_data(state);
+        ft232_usbd_cancel_cdc(&state->cdc);
         SetEPTxStatus(ENDP1, EP_TX_DIS);
         SetEPRxStatus(ENDP2, EP_RX_DIS);
         SetEPTxStatus(ENDP3, EP_TX_DIS);
         SetEPRxStatus(ENDP4, EP_RX_DIS);
+        SetEPTxStatus(ENDP5, EP_TX_DIS);
+        SetEPRxStatus(ENDP6, EP_RX_DIS);
+        SetEPTxStatus(ENDP7, EP_TX_DIS);
     }
 }
 
@@ -787,6 +1075,8 @@ static void ft232_usbd_ep1_in(void)
 
 static void ft232_usbd_ep2_out(void)
 {
+    /* OUT 已经到达时必须撤销兼容性空状态包，让真实 MPSSE 回复先发。 */
+    Ft232Usbd0.state->mpsse_idle_status_pending = 0U;
     ft232_usbd_out_receive(
         Ft232Usbd0.state,
         &Ft232Usbd0.state->channel[FT232_USBD_JTAG_CHANNEL],
@@ -805,6 +1095,44 @@ static void ft232_usbd_ep4_out(void)
         Ft232Usbd0.state,
         &Ft232Usbd0.state->channel[FT232_USBD_AUX_CHANNEL],
         FTDI_USB_AUX_OUT_EP, ENDP4);
+}
+
+static void ft232_usbd_ep6_out(void)
+{
+    Ft232UsbdCdcState *const cdc = &Ft232Usbd0.state->cdc;
+    const uint16_t length = GetEPRxCount(ENDP6);
+
+    SetEPRxStatus(ENDP6, EP_RX_NAK);
+    if (length > FTDI_USB_CDC_DATA_PACKET_SIZE)
+    {
+        cdc->fault = FT232_USBD_CDC_FAULT_OUT_LENGTH;
+        return;
+    }
+    if (length == 0U)
+    {
+        SetEPRxCount(ENDP6, FTDI_USB_CDC_DATA_PACKET_SIZE);
+        SetEPRxValid(ENDP6);
+        return;
+    }
+    if (cdc->out_produced != cdc->out_consumed)
+    {
+        /* EP6 只在邮箱为空时 VALID，命中表示 USB 端点所有权被破坏。 */
+        cdc->fault = FT232_USBD_CDC_FAULT_OUT_OVERWRITE;
+        return;
+    }
+
+    (void)USB_SIL_Read(FTDI_USB_CDC_DATA_OUT_EP, cdc->out_data);
+    cdc->out_length = (uint8_t)length;
+    __asm volatile ("" ::: "memory");
+    cdc->out_produced++;
+}
+
+static void ft232_usbd_ep7_in(void)
+{
+    Ft232UsbdCdcState *const cdc = &Ft232Usbd0.state->cdc;
+
+    cdc->in_consumed = cdc->in_produced;
+    SetEPTxStatus(ENDP7, EP_TX_NAK);
 }
 
 static Ft232UsbdChannelState *ft232_usbd_request_channel(
@@ -845,8 +1173,21 @@ static void ft232_usbd_rx_consume(const Ft232Usbd *const self,
 {
     Ft232UsbdState *const state = self->state;
     const uint8_t irq_was_enabled = Ft232Usbd_InterruptLock(self);
+    const uint8_t consumed_packet =
+        (channel->out_produced != channel->out_consumed) ? 1U : 0U;
 
     channel->out_consumed = channel->out_produced;
+    if ((consumed_packet != 0U) &&
+        (channel == &state->channel[FT232_USBD_JTAG_CHANNEL]) &&
+        (channel->bit_mode == FTDI_SIO_BITMODE_MPSSE))
+    {
+        /* 一个 USB OUT 包可能只含 0x86 等无回复命令。消费完成后重新计时；
+         * 若 manager 随后生成真实数据，tx_write 会撤销这个状态包。
+         */
+        state->mpsse_idle_started_at = ft232_usbd_systick_low();
+        __asm volatile ("" ::: "memory");
+        state->mpsse_idle_status_pending = 1U;
+    }
     if ((state->configured != 0U) && (state->data_enabled != 0U))
     {
         SetEPRxCount(endpoint, FTDI_USB_BULK_PACKET_SIZE);
@@ -888,6 +1229,10 @@ static Ft232UsbdResult ft232_usbd_tx_write(
     }
     else
     {
+        if (channel == &state->channel[FT232_USBD_JTAG_CHANNEL])
+        {
+            state->mpsse_idle_status_pending = 0U;
+        }
         (void)USB_SIL_Write(endpoint_address, (uint8_t *)data, length);
         __asm volatile ("" ::: "memory");
         channel->in_produced++;
@@ -942,6 +1287,21 @@ static void ft232_usbd_cancel_data(Ft232UsbdState *const state)
     ft232_usbd_cancel_channel(&state->channel[FT232_USBD_AUX_CHANNEL]);
 }
 
+static void ft232_usbd_cancel_cdc(Ft232UsbdCdcState *const cdc)
+{
+    cdc->out_produced = cdc->out_consumed;
+    cdc->in_consumed = cdc->in_produced;
+    cdc->out_length = 0U;
+}
+
+static uint32_t ft232_usbd_systick_low(void)
+{
+    const volatile uint32_t *const systick_low =
+        (const volatile uint32_t *)(uintptr_t)&SysTick->CNT;
+
+    return *systick_low;
+}
+
 static void ft232_usbd_cancel_channel(Ft232UsbdChannelState *const channel)
 {
     /* 两个序号分别由 ISR 和主循环拥有；USB reset 发生在 ISR 边界，此处只让
@@ -981,17 +1341,14 @@ static void ft232_usbd_port_set(uint8_t connected)
     if (connected != 0U)
     {
         _SetCNTR((uint16_t)(_GetCNTR() & (uint16_t)~CNTR_PDWN));
-        GPIOA->CFGHR = (GPIOA->CFGHR & ~USBD_PA11_PA12_CFG_MASK) |
-                       USBD_PA11_PA12_FLOATING_INPUT;
+        GPIO_Cfg_UsbdPinsRelease(Ft232Usbd0.config->gpio);
         EXTEN->EXTEN_CTR |= EXTEN_USBD_PU_EN;
     }
     else
     {
         EXTEN->EXTEN_CTR &= ~EXTEN_USBD_PU_EN;
         _SetCNTR((uint16_t)(_GetCNTR() | CNTR_PDWN));
-        GPIOA->OUTDR &= ~USBD_PA11_PA12_PIN_MASK;
-        GPIOA->CFGHR = (GPIOA->CFGHR & ~USBD_PA11_PA12_CFG_MASK) |
-                       USBD_PA11_PA12_OUTPUT_LOW;
+        GPIO_Cfg_UsbdPinsDriveLow(Ft232Usbd0.config->gpio);
     }
 }
 
@@ -1024,11 +1381,18 @@ void USB_LP_CAN1_RX0_IRQHandler(void)
     ft232_usbd_interrupt_service();
 }
 
-_Static_assert(EP_NUM == 5U,
-               "FT2232 endpoint topology requires EP0 through EP4");
+_Static_assert(EP_NUM == 8U,
+               "FT2232 plus CDC endpoint topology requires EP0 through EP7");
 _Static_assert(FTDI_USB_INTERFACE_COUNT == 2U,
                "FT2232 control state requires exactly two channels");
 _Static_assert(sizeof(ft232_eeprom_words) == 128U,
                "FT2232 EEPROM image must contain 64 words");
-_Static_assert(ENDP4_RXADDR + FTDI_USB_BULK_PACKET_SIZE <= USBD_PMA_SIZE,
+_Static_assert(ENDP5_TXADDR >= ENDP4_RXADDR + FTDI_USB_BULK_PACKET_SIZE,
+               "CDC notification PMA overlaps FTDI channel B RX");
+_Static_assert(ENDP6_RXADDR >=
+                   ENDP5_TXADDR + FTDI_USB_CDC_NOTIFICATION_PACKET_SIZE,
+               "CDC OUT PMA overlaps CDC notification IN");
+_Static_assert(ENDP7_TXADDR >= ENDP6_RXADDR + FTDI_USB_CDC_DATA_PACKET_SIZE,
+               "CDC IN PMA overlaps CDC OUT");
+_Static_assert(ENDP7_TXADDR + FTDI_USB_CDC_DATA_PACKET_SIZE <= USBD_PMA_SIZE,
                "USB PMA allocation exceeds the 512-byte packet memory");

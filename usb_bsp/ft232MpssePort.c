@@ -11,6 +11,7 @@ _Static_assert(MPSSE_PORT_TX_PACKET_SIZE == FTDI_USB_IN_DATA_SIZE,
                "MPSSE TX boundary must leave room for FTDI status");
 
 static void ft232_mpsse_enable(const MpssePort *self);
+static void ft232_mpsse_service(const MpssePort *self);
 static uint8_t ft232_mpsse_is_configured(const MpssePort *self);
 static void ft232_mpsse_get_events(const MpssePort *self,
                                    MpssePortEvents *events);
@@ -25,6 +26,7 @@ static void ft232_mpsse_interrupt_unlock(const MpssePort *self, uint8_t token);
 
 static const MpssePortOps ft232_mpsse_ops FT232_MPSSE_PORT_FLASH = {
     .enable = ft232_mpsse_enable,
+    .service = ft232_mpsse_service,
     .is_configured = ft232_mpsse_is_configured,
     .get_events = ft232_mpsse_get_events,
     .rx_peek = ft232_mpsse_rx_peek,
@@ -47,6 +49,11 @@ static const Ft232Usbd *ft232_mpsse_usbd(const MpssePort *const self)
 static void ft232_mpsse_enable(const MpssePort *const self)
 {
     Ft232Usbd_DataEnable(ft232_mpsse_usbd(self));
+}
+
+static void ft232_mpsse_service(const MpssePort *const self)
+{
+    Ft232Usbd_MpsseService(ft232_mpsse_usbd(self));
 }
 
 static uint8_t ft232_mpsse_is_configured(const MpssePort *const self)

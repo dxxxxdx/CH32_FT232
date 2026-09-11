@@ -19,9 +19,11 @@ typedef struct
     uint8_t seen_sio_reset;
     uint8_t seen_host_rx_purge;
     uint8_t seen_host_tx_purge;
+    volatile uint8_t last_result;
+    volatile uint8_t sticky_fault;
 } FtdiJtagServiceState;
 
-_Static_assert(sizeof(FtdiJtagServiceState) <= 4U,
+_Static_assert(sizeof(FtdiJtagServiceState) <= 6U,
                "FTDI JTAG bridge state exceeds its static RAM budget");
 
 typedef struct
@@ -68,5 +70,6 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *self);
 /* 默认静态实例由本模块装配，main 只保留启动和轮询顺序。 */
 void FtdiJtagService0_Init(void);
 void FtdiJtagService0_Poll(void);
+FtdiJtagServiceResult FtdiJtagService0_LastResult(void);
 
 #endif /* CH32_FT232_FTDI_JTAG_SERVICE_H */

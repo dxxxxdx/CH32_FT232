@@ -36,6 +36,8 @@ typedef struct MpssePort MpssePort;
 typedef struct
 {
     void (*enable)(const MpssePort *self);
+    /* 推进 FTDI/USB 自身的传输语义，不得在这里解析或生成 MPSSE 回复。 */
+    void (*service)(const MpssePort *self);
     uint8_t (*is_configured)(const MpssePort *self);
     void (*get_events)(const MpssePort *self, MpssePortEvents *events);
     uint16_t (*rx_peek)(const MpssePort *self, const uint8_t **data);

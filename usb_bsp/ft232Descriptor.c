@@ -22,7 +22,7 @@ const uint8_t FtdiUsbConfigurationDescriptor[FTDI_USB_CONFIG_DESC_SIZE]
     FTDI_USB_DESCRIPTOR_FLASH = {
     0x09U, FTDI_USB_DESC_CONFIGURATION,
     USB_U16_LOW(FTDI_USB_CONFIG_DESC_SIZE), USB_U16_HIGH(FTDI_USB_CONFIG_DESC_SIZE),
-    FTDI_USB_INTERFACE_COUNT,
+    FTDI_USB_TOTAL_INTERFACE_COUNT,
     FTDI_USB_CONFIGURATION_VALUE,
     0x00U,
     0x80U,                                /* 总线供电，不声明远程唤醒。 */
@@ -68,6 +68,58 @@ const uint8_t FtdiUsbConfigurationDescriptor[FTDI_USB_CONFIG_DESC_SIZE]
     0x02U,
     USB_U16_LOW(FTDI_USB_BULK_PACKET_SIZE),
     USB_U16_HIGH(FTDI_USB_BULK_PACKET_SIZE),
+    0x00U,
+
+    /* IAD 把接口 2/3 明确归为一个 CDC ACM 功能，同时保留前两个 FTDI
+     * vendor interface 的编号和端点不变。
+     */
+    0x08U, 0x0BU,                         /* Interface Association */
+    FTDI_USB_CDC_CONTROL_INTERFACE_NUMBER,
+    0x02U,
+    0x02U, 0x02U, 0x01U,
+    0x00U,
+
+    0x09U, 0x04U,                         /* CDC communication interface */
+    FTDI_USB_CDC_CONTROL_INTERFACE_NUMBER,
+    0x00U,
+    0x01U,
+    0x02U, 0x02U, 0x01U,
+    0x00U,
+
+    0x05U, 0x24U, 0x00U, 0x10U, 0x01U,  /* CDC Header 1.10 */
+    0x05U, 0x24U, 0x01U, 0x00U,
+    FTDI_USB_CDC_DATA_INTERFACE_NUMBER,  /* Call Management */
+    0x04U, 0x24U, 0x02U, 0x02U,         /* ACM：支持 line coding。 */
+    0x05U, 0x24U, 0x06U,
+    FTDI_USB_CDC_CONTROL_INTERFACE_NUMBER,
+    FTDI_USB_CDC_DATA_INTERFACE_NUMBER,  /* Union */
+
+    0x07U, 0x05U,                         /* CDC notification IN */
+    FTDI_USB_CDC_NOTIFICATION_IN_EP,
+    0x03U,
+    USB_U16_LOW(FTDI_USB_CDC_NOTIFICATION_PACKET_SIZE),
+    USB_U16_HIGH(FTDI_USB_CDC_NOTIFICATION_PACKET_SIZE),
+    0x10U,
+
+    0x09U, 0x04U,                         /* CDC data interface */
+    FTDI_USB_CDC_DATA_INTERFACE_NUMBER,
+    0x00U,
+    0x02U,
+    0x0AU, 0x00U, 0x00U,
+    0x00U,
+
+    0x07U, 0x05U,                         /* CDC Bulk OUT */
+    FTDI_USB_CDC_DATA_OUT_EP,
+    0x02U,
+    USB_U16_LOW(FTDI_USB_CDC_DATA_PACKET_SIZE),
+    USB_U16_HIGH(FTDI_USB_CDC_DATA_PACKET_SIZE),
+    0x00U,
+
+    0x07U, 0x05U,                         /* CDC Bulk IN */
+    FTDI_USB_CDC_DATA_IN_EP,
+    0x02U,
+    USB_U16_LOW(FTDI_USB_CDC_DATA_PACKET_SIZE),
+    USB_U16_HIGH(FTDI_USB_CDC_DATA_PACKET_SIZE),
     0x00U
 };
 
@@ -135,3 +187,5 @@ _Static_assert(FTDI_USB_BULK_PACKET_SIZE == 64U,
                "CH32 USB Full Speed bulk endpoint must use 64-byte packets");
 _Static_assert(FTDI_USB_IN_DATA_SIZE == 62U,
                "FTDI IN packet reserves two status bytes");
+_Static_assert(FTDI_USB_CDC_DATA_PACKET_SIZE == 16U,
+               "CDC PMA allocation is sized for 16-byte bulk packets");

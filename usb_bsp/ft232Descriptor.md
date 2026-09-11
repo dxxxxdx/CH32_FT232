@@ -1,6 +1,6 @@
 # FTDI JTAG USB 枚举接入
 
-`ft232Descriptor.c` 提供 FT2232 双接口所需的常量描述符，`ft232Descriptor.h`
+`ft232Descriptor.c` 提供 FT2232 双接口和 CDC ACM 功能所需的常量描述符，`ft232Descriptor.h`
 提供长度、端点和 FTDI vendor request 常量。USB 驱动拥有 EP0 状态机和端点寄存器，
 描述符模块不访问 USB 外设，也不访问 `JTAGManager`。
 
@@ -14,7 +14,10 @@
 - interface 0 是通道 A/JTAG，Bulk IN/OUT 为 `0x81/0x02`。
 - interface 1 是通道 B/AUX，Bulk IN/OUT 为 `0x83/0x04`；板级 UART 引脚未指定，
   当前只发布独立原始数据面，不在 USB 层擅自消费为 UART。
-- 四个 Bulk 端点的 `wMaxPacketSize` 均为 64，配置描述符总长度为 55 字节。
+- interface 2/3 由 IAD 组成 CDC ACM 控制/数据功能，通知 IN、Bulk OUT/IN 分别为
+  `0x85/0x06/0x87`。CDC 数据面通过字节流 ops 接到 USART2 DMA 转发服务。
+- 四个 FTDI Bulk 端点的 `wMaxPacketSize` 仍为 64。CDC 三个端点采用 16 字节，
+  配置描述符总长度为 121 字节，全部缓冲区仍位于 512 字节 USB PMA 内。
 - `bcdUSB = 0x0210` 只用于 BOS/MS OS 2.0 发现，CH32 仍按 Full Speed 工作。
 
 ## EP0 的描述符回复
@@ -34,7 +37,7 @@
 
 没有发布 Device Qualifier；Full Speed-only 实现收到该请求时应 STALL。未知类型或索引也应 STALL。
 `SET_ADDRESS` 必须在状态阶段完成后应用地址；`SET_CONFIGURATION(1)` 成功后启用两对
-Bulk 端点，至此标准 USB 枚举完成。
+FTDI Bulk 端点并发布 CDC 的 NAK 端点，至此标准 USB 枚举完成。
 
 Windows 读取 BOS 后会发设备到主机的 vendor request：
 
@@ -67,6 +70,13 @@ latency 值会保存并可读回，但当前回复一产生就提交 IN，不依
 `86 lo hi` 由 Manager 完整消费并丢弃，外部设置的 TCK 分频不会改变当前 GPIO 固定档位。
 `SIO_SET_BAUDRATE` 不校验编码后的 `wIndex`：libftdi 会在其中混入除数高位和芯片代际信息，
 而当前两个数据面都不使用该除数。参数直接丢弃，并由 EP0 返回零长度 Status-IN ACK。
+
+CDC 的 `GET_LINE_CODING` 固定返回 `115200 8N1`。`SET_LINE_CODING` 会完整接收七字节
+data stage 并正常 ACK，但内容只进入 EP0 临时槽，不修改编译期 UART 配置；DTR/RTS 和
+SEND_BREAK 当前同样只完成控制传输。
+
+USART2 固定使用 PA2/PA3 和 DMA1 Channel7/6。UART RX/TX 各有 512 字节静态环形区，
+USB 层、UART 层与转发服务之间只通过 `ByteStreamPortOps` 交换连续片段。
 
 ## 64 字节包与 Manager 队列
 

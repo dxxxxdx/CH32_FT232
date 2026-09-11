@@ -6,21 +6,53 @@
 #define JTAG_GPIO_FLASH __attribute__((section(".rodata.jtag_gpio")))
 #define JTAG_GOWIN_ERASE_CLOCKS (150000UL)
 
-/* CFGHR 每个引脚占四位。0x3=50 MHz 通用推挽输出，0x4=浮空输入。
- * PB13~PB15 对应 bit20~31；PA8 对应 bit0~3。
- */
-#define JTAG_GPIOB_CFG_MASK   (0xFFF00000UL)
-#define JTAG_GPIOB_OUTPUT_CFG (0x33300000UL)
-#define JTAG_GPIOA_CFG_MASK   (0x0000000FUL)
-#define JTAG_GPIOA_INPUT_CFG  (0x00000004UL)
+/* CH32V20x 每个 GPIO 配置占四位；模式值来自 GPIOx_CFGLR/CFGHR。 */
+#define GPIO_CFG_MODE_OUTPUT_PP_50MHZ (0x03UL)
+#define GPIO_CFG_MODE_INPUT_FLOATING  (0x04UL)
+#define GPIO_CFG_MODE_OUTPUT_OD_50MHZ (0x07UL)
+#define GPIO_CFG_MODE_INPUT_PULL      (0x08UL)
+#define GPIO_CFG_MODE_AF_PP_50MHZ     (0x0BUL)
+#define GPIO_CFG_BITS_PER_PIN         (4U)
+#define GPIO_CFG_FIELD_MASK           (0x0FUL)
+#define GPIO_CFG_LOW_PIN_COUNT        (8U)
+
+/* 运行灯每 0.5 秒翻转一次。 */
+#define RUN_LED_HALF_PERIOD_TICKS  (72000000UL)
+/* WCH CH32V20x CoreMark 例程用 0x0D 启动 HCLK、自重载、无中断计数。 */
+#define RUN_LED_SYSTICK_CTLR       (0x0000000DUL)
 
 typedef struct
 {
-    const JtagGpioPin *const tck;
-    const JtagGpioPin *const tdi;
-    const JtagGpioPin *const tdo;
-    const JtagGpioPin *const tms;
+    const GpioCfgPin *const tck;
+    const GpioCfgPin *const tdi;
+    const GpioCfgPin *const tdo;
+    const GpioCfgPin *const tms;
 } JtagGpioPins;
+
+typedef struct
+{
+    uint32_t last_toggle;
+    uint8_t timer_started;
+} RunLedState;
+
+typedef struct
+{
+    const GpioCfgPin *const tx;
+    const GpioCfgPin *const rx;
+    volatile uint32_t *const remap_register;
+    const uint32_t remap_mask;
+    const uint32_t remap_value;
+} UartGpioRoute;
+
+struct GpioCfg
+{
+    const JtagGpioPins *const jtag;
+    const UartGpioRoute *const uart;
+    const GpioCfgPin *const run_led;
+    const GpioCfgPin *const usbd_dm;
+    const GpioCfgPin *const usbd_dp;
+    RunLedState *const run_led_state;
+};
 
 static uint8_t jtag_gpio_shift_lsb(const JtagIo *self,
                                    uint8_t data,
@@ -39,16 +71,27 @@ static void jtag_gpio_clock_program_dr32(const JtagIo *self,
                                          uint8_t tail);
 static void jtag_gpio_clock_erase(const JtagIo *self);
 static inline __attribute__((always_inline)) void jtag_gpio_edge_delay(void);
-static inline void jtag_gpio_pin_write(const JtagGpioPin *pin, uint8_t value);
-static inline void jtag_gpio_pin_set(const JtagGpioPin *pin);
-static inline void jtag_gpio_pin_reset(const JtagGpioPin *pin);
-static inline uint8_t jtag_gpio_pin_read(const JtagGpioPin *pin);
+static inline void gpio_cfg_pin_write(const GpioCfgPin *pin, uint8_t value);
+static inline void gpio_cfg_pin_set(const GpioCfgPin *pin);
+static inline void gpio_cfg_pin_reset(const GpioCfgPin *pin);
+static inline uint8_t gpio_cfg_pin_read(const GpioCfgPin *pin);
+static void gpio_cfg_pin_clock_enable(const GpioCfgPin *pin);
+static void gpio_cfg_pin_mode(const GpioCfgPin *pin, uint32_t mode);
+static void run_led_timer_start(RunLedState *state);
 
 static const JtagGpioPins jtag_gpio_pins JTAG_GPIO_FLASH = {
     .tck = &jtag_gpio_tck,
     .tdi = &jtag_gpio_tdi,
     .tdo = &jtag_gpio_tdo,
     .tms = &jtag_gpio_tms
+};
+
+static const UartGpioRoute uart_gpio_route GPIO_CFG_FLASH = {
+    .tx = &uart_gpio_tx,
+    .rx = &uart_gpio_rx,
+    .remap_register = UART_GPIO_REMAP_REGISTER,
+    .remap_mask = UART_GPIO_REMAP_MASK,
+    .remap_value = UART_GPIO_REMAP_VALUE
 };
 
 static const JtagIoOps jtag_gpio_ops JTAG_GPIO_FLASH = {
@@ -60,56 +103,171 @@ static const JtagIoOps jtag_gpio_ops JTAG_GPIO_FLASH = {
     .clock_erase = jtag_gpio_clock_erase
 };
 
+static RunLedState run_led_state;
+
+const GpioCfg GpioCfg0 GPIO_CFG_FLASH = {
+    .jtag = &jtag_gpio_pins,
+    .uart = &uart_gpio_route,
+    .run_led = &run_led_gpio,
+    .usbd_dm = &usbd_gpio_dm,
+    .usbd_dp = &usbd_gpio_dp,
+    .run_led_state = &run_led_state
+};
+
 const JtagIo JtagIo0 JTAG_GPIO_FLASH = {
     .ops = &jtag_gpio_ops,
     .context = &jtag_gpio_pins
 };
 
-void GPIO_Cfg_Init(const JtagIo *const self)
+void GPIO_Cfg_Init(const GpioCfg *const self)
 {
-    const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
-    const uint32_t output_mask = (uint32_t)pins->tck->mask |
-                                 (uint32_t)pins->tms->mask |
-                                 (uint32_t)pins->tdi->mask;
+    const JtagGpioPins *const pins = self->jtag;
+    const UartGpioRoute *const uart = self->uart;
 
-    /* 先写低输出锁存，再切推挽输出，避免配置瞬间在 TCK/TMS 上产生伪上升沿。 */
-    RCC->APB2PCENR |= (RCC_IOPAEN | RCC_IOPBEN);
-    pins->tck->port->BCR = output_mask;
-    pins->tck->port->CFGHR =
-        (pins->tck->port->CFGHR & ~JTAG_GPIOB_CFG_MASK) |
-        JTAG_GPIOB_OUTPUT_CFG;
-    pins->tdo->port->CFGHR =
-        (pins->tdo->port->CFGHR & ~JTAG_GPIOA_CFG_MASK) |
-        JTAG_GPIOA_INPUT_CFG;
+    /* 引脚对象可分布在不同端口，不在初始化器里暗藏第二份管脚映射。 */
+    RCC->APB2PCENR |= RCC_AFIOEN;
+    gpio_cfg_pin_clock_enable(pins->tck);
+    gpio_cfg_pin_clock_enable(pins->tdi);
+    gpio_cfg_pin_clock_enable(pins->tdo);
+    gpio_cfg_pin_clock_enable(pins->tms);
+    gpio_cfg_pin_clock_enable(uart->tx);
+    gpio_cfg_pin_clock_enable(uart->rx);
+    gpio_cfg_pin_clock_enable(self->run_led);
+    gpio_cfg_pin_clock_enable(self->usbd_dm);
+    gpio_cfg_pin_clock_enable(self->usbd_dp);
+    *uart->remap_register =
+        (*uart->remap_register & ~uart->remap_mask) | uart->remap_value;
+
+    /* RX 的 OUTDR 位选择内部上拉。TX 先以普通推挽输出高电平，再切换到
+     * 所选 UART 的复用推挽，避免 UART 尚未使能时在线上制造低脉冲。
+     */
+    gpio_cfg_pin_set(uart->tx);
+    gpio_cfg_pin_set(uart->rx);
+    gpio_cfg_pin_mode(uart->tx, GPIO_CFG_MODE_OUTPUT_PP_50MHZ);
+    gpio_cfg_pin_mode(uart->rx, GPIO_CFG_MODE_INPUT_PULL);
+    gpio_cfg_pin_mode(uart->tx, GPIO_CFG_MODE_AF_PP_50MHZ);
+
+    /* 先释放开漏输出再切换模式，启动阶段不会短暂点亮。 */
+    gpio_cfg_pin_set(self->run_led);
+    gpio_cfg_pin_mode(self->run_led, GPIO_CFG_MODE_OUTPUT_OD_50MHZ);
+    self->run_led_state->last_toggle = 0U;
+    self->run_led_state->timer_started = 0U;
+
+    /* 先写低输出锁存，再逐脚切推挽输出，避免配置瞬间
+     * 在 TCK/TMS 上产生伪上升沿。TDO 保持浮空，空闲高电平由板上拉高保证。
+     */
+    pins->tck->port->BCR = (uint32_t)pins->tck->mask;
+    pins->tms->port->BCR = (uint32_t)pins->tms->mask;
+    pins->tdi->port->BCR = (uint32_t)pins->tdi->mask;
+    gpio_cfg_pin_mode(pins->tck, GPIO_CFG_MODE_OUTPUT_PP_50MHZ);
+    gpio_cfg_pin_mode(pins->tms, GPIO_CFG_MODE_OUTPUT_PP_50MHZ);
+    gpio_cfg_pin_mode(pins->tdi, GPIO_CFG_MODE_OUTPUT_PP_50MHZ);
+    gpio_cfg_pin_mode(pins->tdo, GPIO_CFG_MODE_INPUT_FLOATING);
 }
 
-static inline void jtag_gpio_pin_write(const JtagGpioPin *const pin,
-                                       uint8_t value)
+void GPIO_Cfg_UsbdPinsRelease(const GpioCfg *const self)
 {
-    if (value != 0U)
+    gpio_cfg_pin_mode(self->usbd_dm, GPIO_CFG_MODE_INPUT_FLOATING);
+    gpio_cfg_pin_mode(self->usbd_dp, GPIO_CFG_MODE_INPUT_FLOATING);
+}
+
+void GPIO_Cfg_UsbdPinsDriveLow(const GpioCfg *const self)
+{
+    gpio_cfg_pin_reset(self->usbd_dm);
+    gpio_cfg_pin_reset(self->usbd_dp);
+    gpio_cfg_pin_mode(self->usbd_dm, GPIO_CFG_MODE_OUTPUT_PP_50MHZ);
+    gpio_cfg_pin_mode(self->usbd_dp, GPIO_CFG_MODE_OUTPUT_PP_50MHZ);
+}
+
+void GPIO_Cfg_RunLedService(const GpioCfg *const self)
+{
+    RunLedState *const state = self->run_led_state;
+    const volatile uint32_t *const systick_low =
+        (const volatile uint32_t *)(uintptr_t)&SysTick->CNT;
+    uint32_t now;
+
+    if (state->timer_started == 0U)
     {
-        jtag_gpio_pin_set(pin);
+        /* USB 初始化中的 Delay_Ms 会独占 SysTick，所以在主循环首次进入时
+         * 才切换成自由运行计数器。
+         */
+        run_led_timer_start(state);
+        return;
+    }
+
+    now = *systick_low;
+    if ((uint32_t)(now - state->last_toggle) < RUN_LED_HALF_PERIOD_TICKS)
+    {
+        return;
+    }
+    state->last_toggle = now;
+    if ((self->run_led->port->OUTDR & (uint32_t)self->run_led->mask) != 0U)
+    {
+        self->run_led->port->BCR = (uint32_t)self->run_led->mask;
     }
     else
     {
-        jtag_gpio_pin_reset(pin);
+        self->run_led->port->BSHR = (uint32_t)self->run_led->mask;
     }
 }
 
-static inline void jtag_gpio_pin_set(const JtagGpioPin *const pin)
+static void run_led_timer_start(RunLedState *const state)
+{
+    SysTick->CTLR = 0U;
+    SysTick->CNT = 0U;
+    SysTick->CMP = UINT64_MAX;
+    SysTick->CTLR = RUN_LED_SYSTICK_CTLR;
+    state->last_toggle = 0U;
+    state->timer_started = 1U;
+}
+
+static inline void gpio_cfg_pin_write(const GpioCfgPin *const pin,
+                                      uint8_t value)
+{
+    if (value != 0U)
+    {
+        gpio_cfg_pin_set(pin);
+    }
+    else
+    {
+        gpio_cfg_pin_reset(pin);
+    }
+}
+
+static inline void gpio_cfg_pin_set(const GpioCfgPin *const pin)
 {
     /* 保留 BL702 路径的 OUTDR 读改写节拍，不能换成 BSHR/BCR 改变建立时间。 */
     pin->port->OUTDR |= (uint32_t)pin->mask;
 }
 
-static inline void jtag_gpio_pin_reset(const JtagGpioPin *const pin)
+static inline void gpio_cfg_pin_reset(const GpioCfgPin *const pin)
 {
     pin->port->OUTDR &= ~(uint32_t)pin->mask;
 }
 
-static inline uint8_t jtag_gpio_pin_read(const JtagGpioPin *const pin)
+static inline uint8_t gpio_cfg_pin_read(const GpioCfgPin *const pin)
 {
     return ((pin->port->INDR & (uint32_t)pin->mask) != 0U) ? 1U : 0U;
+}
+
+static void gpio_cfg_pin_clock_enable(const GpioCfgPin *const pin)
+{
+    RCC->APB2PCENR |= pin->port_clock;
+}
+
+static void gpio_cfg_pin_mode(const GpioCfgPin *const pin, uint32_t mode)
+{
+    const uint32_t field_shift =
+        ((uint32_t)pin->number & (GPIO_CFG_LOW_PIN_COUNT - 1U)) *
+        GPIO_CFG_BITS_PER_PIN;
+    const uint32_t field_mask = GPIO_CFG_FIELD_MASK << field_shift;
+    volatile uint32_t *const config =
+        (pin->number < GPIO_CFG_LOW_PIN_COUNT)
+            ? &pin->port->CFGLR
+            : &pin->port->CFGHR;
+
+    *config = (*config & ~field_mask) |
+              ((mode & GPIO_CFG_FIELD_MASK) << field_shift);
 }
 
 static uint8_t jtag_gpio_shift_lsb(const JtagIo *const self,
@@ -121,17 +279,17 @@ static uint8_t jtag_gpio_shift_lsb(const JtagIo *const self,
 
     for (uint8_t bit = 0U; bit < bits; bit++)
     {
-        jtag_gpio_pin_reset(pins->tck);
-        jtag_gpio_pin_write(pins->tdi, (uint8_t)(data & 0x01U));
+        gpio_cfg_pin_reset(pins->tck);
+        gpio_cfg_pin_write(pins->tdi, (uint8_t)(data & 0x01U));
         data = (uint8_t)(data >> 1U);
         reply = (uint8_t)(reply >> 1U);
-        jtag_gpio_pin_set(pins->tck);
-        if (jtag_gpio_pin_read(pins->tdo) != 0U)
+        gpio_cfg_pin_set(pins->tck);
+        if (gpio_cfg_pin_read(pins->tdo) != 0U)
         {
             reply |= 0x80U;
         }
     }
-    jtag_gpio_pin_reset(pins->tck);
+    gpio_cfg_pin_reset(pins->tck);
     return reply;
 }
 
@@ -144,17 +302,17 @@ static uint8_t jtag_gpio_shift_msb(const JtagIo *const self,
 
     for (uint8_t bit = 0U; bit < bits; bit++)
     {
-        jtag_gpio_pin_reset(pins->tck);
-        jtag_gpio_pin_write(pins->tdi, (uint8_t)(data & 0x80U));
+        gpio_cfg_pin_reset(pins->tck);
+        gpio_cfg_pin_write(pins->tdi, (uint8_t)(data & 0x80U));
         data = (uint8_t)(data << 1U);
         reply = (uint8_t)(reply << 1U);
-        jtag_gpio_pin_set(pins->tck);
-        if (jtag_gpio_pin_read(pins->tdo) != 0U)
+        gpio_cfg_pin_set(pins->tck);
+        if (gpio_cfg_pin_read(pins->tdo) != 0U)
         {
             reply |= 0x01U;
         }
     }
-    jtag_gpio_pin_reset(pins->tck);
+    gpio_cfg_pin_reset(pins->tck);
     return reply;
 }
 
@@ -166,12 +324,12 @@ static void jtag_gpio_shift_msb_output(const JtagIo *const self,
 
     for (uint8_t bit = 0U; bit < bits; bit++)
     {
-        jtag_gpio_pin_reset(pins->tck);
-        jtag_gpio_pin_write(pins->tdi, (uint8_t)(data & 0x80U));
+        gpio_cfg_pin_reset(pins->tck);
+        gpio_cfg_pin_write(pins->tdi, (uint8_t)(data & 0x80U));
         data = (uint8_t)(data << 1U);
-        jtag_gpio_pin_set(pins->tck);
+        gpio_cfg_pin_set(pins->tck);
     }
-    jtag_gpio_pin_reset(pins->tck);
+    gpio_cfg_pin_reset(pins->tck);
 }
 
 static uint8_t jtag_gpio_shift_tms(const JtagIo *const self,
@@ -181,20 +339,20 @@ static uint8_t jtag_gpio_shift_tms(const JtagIo *const self,
     const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
     uint8_t reply = 0U;
 
-    jtag_gpio_pin_write(pins->tdi, (uint8_t)(data & 0x80U));
+    gpio_cfg_pin_write(pins->tdi, (uint8_t)(data & 0x80U));
     for (uint8_t bit = 0U; bit < bits; bit++)
     {
-        jtag_gpio_pin_reset(pins->tck);
-        jtag_gpio_pin_write(pins->tms, (uint8_t)(data & 0x01U));
+        gpio_cfg_pin_reset(pins->tck);
+        gpio_cfg_pin_write(pins->tms, (uint8_t)(data & 0x01U));
         data = (uint8_t)(data >> 1U);
         reply = (uint8_t)(reply >> 1U);
-        jtag_gpio_pin_set(pins->tck);
-        if (jtag_gpio_pin_read(pins->tdo) != 0U)
+        gpio_cfg_pin_set(pins->tck);
+        if (gpio_cfg_pin_read(pins->tdo) != 0U)
         {
             reply |= 0x80U;
         }
     }
-    jtag_gpio_pin_reset(pins->tck);
+    gpio_cfg_pin_reset(pins->tck);
     return reply;
 }
 
@@ -210,7 +368,9 @@ static void jtag_gpio_clock_program_dr32(const JtagIo *const self,
     const uint32_t output_base = port->OUTDR & ~(tck_mask | tms_mask | tdi_mask);
     uint32_t output_low = output_base;
 
-    /* 三个输出静态配置在 GPIOB；合并写保持 Gowin 24/7/1 位之间无空档。 */
+    /* 三个输出由 GPIO_Cfg.h 静态约束在同一端口；合并写保持
+     * Gowin 24/7/1 位之间无空档。
+     */
     for (uint8_t bit_index = 0U; bit_index < 32U; bit_index++)
     {
         uint8_t tdi;
@@ -252,16 +412,16 @@ static void jtag_gpio_clock_erase(const JtagIo *const self)
 {
     const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
 
-    jtag_gpio_pin_reset(pins->tms);
-    jtag_gpio_pin_reset(pins->tdi);
+    gpio_cfg_pin_reset(pins->tms);
+    gpio_cfg_pin_reset(pins->tdi);
     for (uint32_t clock = 0U; clock < JTAG_GOWIN_ERASE_CLOCKS; clock++)
     {
-        jtag_gpio_pin_reset(pins->tck);
+        gpio_cfg_pin_reset(pins->tck);
         jtag_gpio_edge_delay();
-        jtag_gpio_pin_set(pins->tck);
+        gpio_cfg_pin_set(pins->tck);
         jtag_gpio_edge_delay();
     }
-    jtag_gpio_pin_reset(pins->tck);
+    gpio_cfg_pin_reset(pins->tck);
 }
 
 static inline __attribute__((always_inline)) void jtag_gpio_edge_delay(void)

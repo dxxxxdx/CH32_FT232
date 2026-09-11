@@ -6,6 +6,8 @@
 #include "ch32v20x.h"
 #include "ft232Descriptor.h"
 
+struct GpioCfg;
+
 typedef enum
 {
     FT232_USBD_FAULT_NONE = 0,
@@ -17,6 +19,7 @@ typedef struct
 {
     uint32_t usb_clock_source;
     NVIC_InitTypeDef interrupt;
+    const struct GpioCfg *const gpio;
 } Ft232UsbdConfig;
 
 /* 每个 FT2232 通道各有一个 64 字节静态邮箱：ISR 填满后不重开端点，
@@ -34,12 +37,34 @@ typedef struct
     uint8_t bit_mode;
 } Ft232UsbdChannelState;
 
+typedef enum
+{
+    FT232_USBD_CDC_FAULT_NONE = 0,
+    FT232_USBD_CDC_FAULT_OUT_LENGTH,
+    FT232_USBD_CDC_FAULT_OUT_OVERWRITE
+} Ft232UsbdCdcFault;
+
+typedef struct
+{
+    uint8_t out_data[FTDI_USB_CDC_DATA_PACKET_SIZE];
+    volatile uint8_t out_length;
+    volatile uint8_t out_produced;
+    volatile uint8_t out_consumed;
+    volatile uint8_t in_produced;
+    volatile uint8_t in_consumed;
+    volatile uint8_t data_enabled;
+    volatile uint8_t fault;
+} Ft232UsbdCdcState;
+
 typedef struct
 {
     Ft232UsbdChannelState channel[FTDI_USB_INTERFACE_COUNT];
     /* JTAG 核只交付裸 MPSSE 回复；FTDI 状态头由 USB 边界在此补齐。 */
     uint8_t mpsse_in_packet[FTDI_USB_BULK_PACKET_SIZE];
-    uint8_t control_reply[FTDI_USB_STATUS_SIZE];
+    /* 同一时刻 EP0 只有一个事务；此槽同时承载 FTDI 短回复和 CDC 的
+     * 7 字节 line coding，SET 收到的外部配置在状态阶段后直接丢弃。
+     */
+    uint8_t control_reply[FTDI_USB_CDC_LINE_CODING_SIZE];
     uint8_t control_reply_length;
     volatile uint8_t configured;
     volatile uint8_t data_enabled;
@@ -48,9 +73,12 @@ typedef struct
     volatile uint8_t host_rx_purge_event;
     volatile uint8_t host_tx_purge_event;
     volatile uint8_t fault;
+    Ft232UsbdCdcState cdc;
+    uint32_t mpsse_idle_started_at;
+    volatile uint8_t mpsse_idle_status_pending;
 } Ft232UsbdState;
 
-_Static_assert(sizeof(Ft232UsbdState) <= 224U,
+_Static_assert(sizeof(Ft232UsbdState) <= 256U,
                "FT232 USBD state exceeds its static RAM budget");
 
 typedef struct
@@ -87,12 +115,17 @@ void Ft232Usbd_InterruptInit(const Ft232Usbd *self);
 
 /* GPIO/JTAG 就绪后才打开 bulk 数据面。枚举和 FTDI 控制请求不依赖此开关。 */
 void Ft232Usbd_DataEnable(const Ft232Usbd *self);
+/* openFPGALoader 进入 MPSSE 及发送无数据回复的配置命令后都会空读；
+ * 延迟补 FTDI 状态包结束这类读取，真实 MPSSE 回复始终优先。
+ */
+void Ft232Usbd_MpsseService(const Ft232Usbd *self);
 uint8_t Ft232Usbd_IsConfigured(const Ft232Usbd *self);
 void Ft232Usbd_GetEvents(const Ft232Usbd *self, Ft232UsbdEvents *events);
 
 /* 通道 A OUT 数据就是裸 MPSSE，Peek 后必须整包 Consume；未消费时 EP2 保持 NAK。
  * MpsseTxWrite 接受 1..62 字节裸回复，在本层补 31 60 后复制进 USB PMA。
- * 返回 OK 后调用方即可释放源数据；空回复不会生成只有状态头的 IN 包。
+ * 返回 OK 后调用方即可释放源数据；此写接口不接受空回复，无数据命令
+ * 之后的状态包只由 MpsseService 的延迟兼容路径产生。
  */
 uint16_t Ft232Usbd_MpsseRxPeek(const Ft232Usbd *self, const uint8_t **data);
 void Ft232Usbd_MpsseRxConsume(const Ft232Usbd *self);
@@ -106,6 +139,18 @@ Ft232UsbdResult Ft232Usbd_MpsseTxWrite(const Ft232Usbd *self,
 uint16_t Ft232Usbd_AuxRxPeek(const Ft232Usbd *self, const uint8_t **data);
 void Ft232Usbd_AuxRxConsume(const Ft232Usbd *self);
 Ft232UsbdResult Ft232Usbd_AuxTxWrite(const Ft232Usbd *self,
+                                     const uint8_t *data,
+                                     uint16_t length);
+
+/* CDC 只向转发服务发布裸字节邮箱。USB 中断拥有生产端，主循环消费后才
+ * 重新 VALID EP6；EP7 写入完成前返回 TX_BUSY。
+ */
+void Ft232Usbd_CdcDataEnable(const Ft232Usbd *self);
+uint8_t Ft232Usbd_CdcIsReady(const Ft232Usbd *self);
+Ft232UsbdCdcFault Ft232Usbd_CdcGetFault(const Ft232Usbd *self);
+uint16_t Ft232Usbd_CdcRxPeek(const Ft232Usbd *self, const uint8_t **data);
+void Ft232Usbd_CdcRxConsume(const Ft232Usbd *self);
+Ft232UsbdResult Ft232Usbd_CdcTxWrite(const Ft232Usbd *self,
                                      const uint8_t *data,
                                      uint16_t length);
 

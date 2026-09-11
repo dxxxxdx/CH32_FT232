@@ -28,6 +28,12 @@ void FtdiJtagService0_Poll(void)
     const FtdiJtagServiceResult result =
         FtdiJtagService_Service(&ftdi_jtag_service);
 
+    ftdi_jtag_service.state->last_result = (uint8_t)result;
+    if (result >= FTDI_JTAG_SERVICE_PORT_RX_LENGTH_FAULT)
+    {
+        ftdi_jtag_service.state->sticky_fault = (uint8_t)result;
+    }
+
     switch (result)
     {
     case FTDI_JTAG_SERVICE_IDLE:
@@ -46,6 +52,11 @@ void FtdiJtagService0_Poll(void)
     }
 }
 
+FtdiJtagServiceResult FtdiJtagService0_LastResult(void)
+{
+    return (FtdiJtagServiceResult)ftdi_jtag_service.state->last_result;
+}
+
 void FtdiJtagService_Init(const FtdiJtagService *const self)
 {
     MpssePortEvents events;
@@ -56,6 +67,8 @@ void FtdiJtagService_Init(const FtdiJtagService *const self)
     self->state->seen_sio_reset = events.sio_reset;
     self->state->seen_host_rx_purge = events.host_rx_purge;
     self->state->seen_host_tx_purge = events.host_tx_purge;
+    self->state->last_result = FTDI_JTAG_SERVICE_IDLE;
+    self->state->sticky_fault = FTDI_JTAG_SERVICE_IDLE;
     self->config->port->ops->enable(self->config->port);
 }
 
@@ -131,9 +144,8 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
         progressed = 1U;
     }
 
-    /* OUT 和 Manager 都推进后再次检查回复。不能主动挂只有 31 60 的空状态包：
-     * Gowin WINUSB 的 MPSSE 同步只读一次，若先取走空包就会把有效回复留在
-     * 下一包，并在 synchronize_mpsse 中把零长度数组当成同步结果。
+    /* OUT 和 Manager 都推进后再次检查真实回复。只有 31 60 的兼容状态包
+     * 由 USB port service 延迟产生；JTAG 层不能把它混入解析器 TX 队列。
      */
     pump_result = ftdi_jtag_pump_port_tx(self);
     if (pump_result == FTDI_JTAG_PUMP_PROGRESS)
@@ -157,6 +169,11 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
     {
         waiting = 1U;
     }
+
+    /* 真实 TX 已经获得两次优先发送机会，最后才允许 USB 层补空闲状态包。
+     * JTAG 核只调用 port service，不读取 USB 时钟、端点或 bit mode。
+     */
+    self->config->port->ops->service(self->config->port);
 
     if (progressed != 0U)
     {

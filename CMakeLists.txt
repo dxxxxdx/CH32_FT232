@@ -54,6 +54,25 @@ set(CMAKE_CXX_EXTENSIONS ON)
 set(TARGET_NAME CH32_FT232)
 set(LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/Ld/Link.ld")
 
+# 留空时由 UartForwardConfig.h 选择默认 PA23；自定义构建脚本
+# 可传 -DUART_FORWARD_PORT_SELECT=PB67，该值会传递到所有 C 编译单元。
+set(UART_FORWARD_PORT_SELECT "" CACHE STRING
+        "UART forwarding port: empty/PA23 or PB67")
+set_property(CACHE UART_FORWARD_PORT_SELECT PROPERTY STRINGS "" PA23 PB67)
+
+set(UART_FORWARD_PORT_DEFINITION "")
+if(UART_FORWARD_PORT_SELECT STREQUAL "" OR
+   UART_FORWARD_PORT_SELECT STREQUAL "PA23")
+    message(STATUS "UART forwarding port = PA23 (default)")
+elseif(UART_FORWARD_PORT_SELECT STREQUAL "PB67")
+    set(UART_FORWARD_PORT_DEFINITION
+            UART_FORWARD_PORT=UART_FORWARD_PORT_PB67)
+    message(STATUS "UART forwarding port = PB67")
+else()
+    message(FATAL_ERROR
+            "UART_FORWARD_PORT_SELECT must be PA23 or PB67, got: ${UART_FORWARD_PORT_SELECT}")
+endif()
+
 if(NOT EXISTS "${LINKER_SCRIPT}")
     message(FATAL_ERROR "Linker script not found: ${LINKER_SCRIPT}")
 endif()
@@ -175,6 +194,7 @@ target_include_directories(${TARGET_NAME} PRIVATE
 
 target_compile_definitions(${TARGET_NAME} PRIVATE
         CH32V20x_D6
+        ${UART_FORWARD_PORT_DEFINITION}
 )
 
 # =========================================================================
