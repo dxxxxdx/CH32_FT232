@@ -63,10 +63,6 @@ static const GpioCfgPin jtag_gpio_tms GPIO_CFG_FLASH = JTAG_TMS_PIN_CFG;
 static const GpioCfgPin uart_gpio_tx GPIO_CFG_FLASH = UART_TX_PIN_CFG;
 static const GpioCfgPin uart_gpio_rx GPIO_CFG_FLASH = UART_RX_PIN_CFG;
 
-/* PB0 开漏运行灯：输出低电平点亮，输出高电平时释放总线。 */
-static const GpioCfgPin run_led_gpio GPIO_CFG_FLASH =
-    GPIO_CFG_PIN(GPIOB, RCC_IOPBEN, 0U);
-
 /* USB FS 固定使用 PA11/PA12，连接和软断开的引脚操作仍由
  * GPIO_Cfg 执行，USB 协议层不再持有引脚常量。
  */
@@ -81,7 +77,6 @@ static const GpioCfgPin usbd_gpio_dp GPIO_CFG_FLASH =
 extern const GpioCfg GpioCfg0;
 
 void GPIO_Cfg_Init(const GpioCfg *self);
-void GPIO_Cfg_RunLedService(const GpioCfg *self);
 void GPIO_Cfg_UsbdPinsRelease(const GpioCfg *self);
 void GPIO_Cfg_UsbdPinsDriveLow(const GpioCfg *self);
 

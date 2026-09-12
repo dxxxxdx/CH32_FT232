@@ -54,6 +54,14 @@ set(CMAKE_CXX_EXTENSIONS ON)
 set(TARGET_NAME CH32_FT232)
 set(LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/Ld/Link.ld")
 
+# 无状态灯的板子关闭后不会实例化 LED，也不会配置任何 LED GPIO。
+option(RUN_LED_ENABLE "Enable the default PB0 run LED" ON)
+if(RUN_LED_ENABLE)
+    set(RUN_LED_DEFINITION RUN_LED_ENABLED=1U)
+else()
+    set(RUN_LED_DEFINITION RUN_LED_ENABLED=0U)
+endif()
+
 # 留空时由 UartForwardConfig.h 选择默认 PA23；自定义构建脚本
 # 可传 -DUART_FORWARD_PORT_SELECT=PB67，该值会传递到所有 C 编译单元。
 set(UART_FORWARD_PORT_SELECT "" CACHE STRING
@@ -195,6 +203,7 @@ target_include_directories(${TARGET_NAME} PRIVATE
 target_compile_definitions(${TARGET_NAME} PRIVATE
         CH32V20x_D6
         ${UART_FORWARD_PORT_DEFINITION}
+        ${RUN_LED_DEFINITION}
 )
 
 # =========================================================================

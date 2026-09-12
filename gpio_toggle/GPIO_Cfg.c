@@ -9,17 +9,11 @@
 /* CH32V20x 每个 GPIO 配置占四位；模式值来自 GPIOx_CFGLR/CFGHR。 */
 #define GPIO_CFG_MODE_OUTPUT_PP_50MHZ (0x03UL)
 #define GPIO_CFG_MODE_INPUT_FLOATING  (0x04UL)
-#define GPIO_CFG_MODE_OUTPUT_OD_50MHZ (0x07UL)
 #define GPIO_CFG_MODE_INPUT_PULL      (0x08UL)
 #define GPIO_CFG_MODE_AF_PP_50MHZ     (0x0BUL)
 #define GPIO_CFG_BITS_PER_PIN         (4U)
 #define GPIO_CFG_FIELD_MASK           (0x0FUL)
 #define GPIO_CFG_LOW_PIN_COUNT        (8U)
-
-/* 运行灯每 0.5 秒翻转一次。 */
-#define RUN_LED_HALF_PERIOD_TICKS  (72000000UL)
-/* WCH CH32V20x CoreMark 例程用 0x0D 启动 HCLK、自重载、无中断计数。 */
-#define RUN_LED_SYSTICK_CTLR       (0x0000000DUL)
 
 typedef struct
 {
@@ -28,12 +22,6 @@ typedef struct
     const GpioCfgPin *const tdo;
     const GpioCfgPin *const tms;
 } JtagGpioPins;
-
-typedef struct
-{
-    uint32_t last_toggle;
-    uint8_t timer_started;
-} RunLedState;
 
 typedef struct
 {
@@ -48,10 +36,8 @@ struct GpioCfg
 {
     const JtagGpioPins *const jtag;
     const UartGpioRoute *const uart;
-    const GpioCfgPin *const run_led;
     const GpioCfgPin *const usbd_dm;
     const GpioCfgPin *const usbd_dp;
-    RunLedState *const run_led_state;
 };
 
 static uint8_t jtag_gpio_shift_lsb(const JtagIo *self,
@@ -77,7 +63,6 @@ static inline void gpio_cfg_pin_reset(const GpioCfgPin *pin);
 static inline uint8_t gpio_cfg_pin_read(const GpioCfgPin *pin);
 static void gpio_cfg_pin_clock_enable(const GpioCfgPin *pin);
 static void gpio_cfg_pin_mode(const GpioCfgPin *pin, uint32_t mode);
-static void run_led_timer_start(RunLedState *state);
 
 static const JtagGpioPins jtag_gpio_pins JTAG_GPIO_FLASH = {
     .tck = &jtag_gpio_tck,
@@ -103,15 +88,11 @@ static const JtagIoOps jtag_gpio_ops JTAG_GPIO_FLASH = {
     .clock_erase = jtag_gpio_clock_erase
 };
 
-static RunLedState run_led_state;
-
 const GpioCfg GpioCfg0 GPIO_CFG_FLASH = {
     .jtag = &jtag_gpio_pins,
     .uart = &uart_gpio_route,
-    .run_led = &run_led_gpio,
     .usbd_dm = &usbd_gpio_dm,
-    .usbd_dp = &usbd_gpio_dp,
-    .run_led_state = &run_led_state
+    .usbd_dp = &usbd_gpio_dp
 };
 
 const JtagIo JtagIo0 JTAG_GPIO_FLASH = {
@@ -132,7 +113,6 @@ void GPIO_Cfg_Init(const GpioCfg *const self)
     gpio_cfg_pin_clock_enable(pins->tms);
     gpio_cfg_pin_clock_enable(uart->tx);
     gpio_cfg_pin_clock_enable(uart->rx);
-    gpio_cfg_pin_clock_enable(self->run_led);
     gpio_cfg_pin_clock_enable(self->usbd_dm);
     gpio_cfg_pin_clock_enable(self->usbd_dp);
     *uart->remap_register =
@@ -146,12 +126,6 @@ void GPIO_Cfg_Init(const GpioCfg *const self)
     gpio_cfg_pin_mode(uart->tx, GPIO_CFG_MODE_OUTPUT_PP_50MHZ);
     gpio_cfg_pin_mode(uart->rx, GPIO_CFG_MODE_INPUT_PULL);
     gpio_cfg_pin_mode(uart->tx, GPIO_CFG_MODE_AF_PP_50MHZ);
-
-    /* 先释放开漏输出再切换模式，启动阶段不会短暂点亮。 */
-    gpio_cfg_pin_set(self->run_led);
-    gpio_cfg_pin_mode(self->run_led, GPIO_CFG_MODE_OUTPUT_OD_50MHZ);
-    self->run_led_state->last_toggle = 0U;
-    self->run_led_state->timer_started = 0U;
 
     /* 先写低输出锁存，再逐脚切推挽输出，避免配置瞬间
      * 在 TCK/TMS 上产生伪上升沿。TDO 保持浮空，空闲高电平由板上拉高保证。
@@ -177,48 +151,6 @@ void GPIO_Cfg_UsbdPinsDriveLow(const GpioCfg *const self)
     gpio_cfg_pin_reset(self->usbd_dp);
     gpio_cfg_pin_mode(self->usbd_dm, GPIO_CFG_MODE_OUTPUT_PP_50MHZ);
     gpio_cfg_pin_mode(self->usbd_dp, GPIO_CFG_MODE_OUTPUT_PP_50MHZ);
-}
-
-void GPIO_Cfg_RunLedService(const GpioCfg *const self)
-{
-    RunLedState *const state = self->run_led_state;
-    const volatile uint32_t *const systick_low =
-        (const volatile uint32_t *)(uintptr_t)&SysTick->CNT;
-    uint32_t now;
-
-    if (state->timer_started == 0U)
-    {
-        /* USB 初始化中的 Delay_Ms 会独占 SysTick，所以在主循环首次进入时
-         * 才切换成自由运行计数器。
-         */
-        run_led_timer_start(state);
-        return;
-    }
-
-    now = *systick_low;
-    if ((uint32_t)(now - state->last_toggle) < RUN_LED_HALF_PERIOD_TICKS)
-    {
-        return;
-    }
-    state->last_toggle = now;
-    if ((self->run_led->port->OUTDR & (uint32_t)self->run_led->mask) != 0U)
-    {
-        self->run_led->port->BCR = (uint32_t)self->run_led->mask;
-    }
-    else
-    {
-        self->run_led->port->BSHR = (uint32_t)self->run_led->mask;
-    }
-}
-
-static void run_led_timer_start(RunLedState *const state)
-{
-    SysTick->CTLR = 0U;
-    SysTick->CNT = 0U;
-    SysTick->CMP = UINT64_MAX;
-    SysTick->CTLR = RUN_LED_SYSTICK_CTLR;
-    state->last_toggle = 0U;
-    state->timer_started = 1U;
 }
 
 static inline void gpio_cfg_pin_write(const GpioCfgPin *const pin,

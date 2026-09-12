@@ -1,5 +1,7 @@
 #include "jtagManager.h"
 
+#include "Hook.h"
+
 /* 命令集合与普通 GPIO 时序来源：BL702 firmware/app/usb2uartjtag/jtag_process.c。
  * 这里仅承接已经去掉 USB 层的 MPSSE 字节流，不增加新的命令语义。
  */
@@ -14,6 +16,7 @@ typedef struct {
     uint32_t clocks_left;
     uint16_t input_left;
     uint8_t stopped;
+    uint8_t toggle_hook_fired;
     JtagServiceResult result;
 } JtagServiceWork;
 
@@ -21,9 +24,12 @@ static void jtag_process_command(const JTAGManager *const self, JtagServiceWork 
 static void jtag_process_arguments(const JTAGManager *const self, JtagServiceWork *const work);
 static void jtag_process_shift(const JTAGManager *const self, JtagServiceWork *const work);
 static void jtag_stop(JtagServiceWork *const work, JtagServiceResult result);
+static void jtag_toggle_begin(JtagServiceWork *work);
 static uint8_t jtag_rx_take(const JTAGManager *const self, JtagServiceWork *const work);
 static void jtag_tx_put(const JTAGManager *const self, uint8_t value);
-static uint8_t jtag_gowin_long_clock_byte(const JTAGManager *self, uint8_t data);
+static uint8_t jtag_gowin_long_clock_byte(const JTAGManager *self,
+                                          JtagServiceWork *work,
+                                          uint8_t data);
 static uint8_t jtag_gowin_capture_program_data(const JTAGManager *self,
                                                 uint8_t data,
                                                 uint8_t bits);
@@ -42,6 +48,7 @@ JtagServiceResult JTAGManager_Service(const JTAGManager *const self, uint32_t cl
                            ? 0xFFFFFFFFUL : clock_budget,
         .input_left = self->config->rx->ops->used(self->config->rx),
         .stopped = 0U,
+        .toggle_hook_fired = 0U,
         .result = JTAG_SERVICE_IDLE
     };
 
@@ -87,6 +94,14 @@ static void jtag_stop(JtagServiceWork *const work, JtagServiceResult result)
 {
     work->stopped = 1U;
     work->result = result;
+}
+
+static void jtag_toggle_begin(JtagServiceWork *const work)
+{
+    if (work->toggle_hook_fired == 0U) {
+        work->toggle_hook_fired = 1U;
+        Hook_JtagToggleStart();
+    }
 }
 
 static uint8_t jtag_rx_take(const JTAGManager *const self, JtagServiceWork *const work)
@@ -228,7 +243,8 @@ static void jtag_process_shift(const JTAGManager *const self, JtagServiceWork *c
     }
 
     data = self->config->rx->ops->front(self->config->rx);
-    if ((byte_mode != 0U) && (jtag_gowin_long_clock_byte(self, data) != 0U)) {
+    if ((byte_mode != 0U) &&
+        (jtag_gowin_long_clock_byte(self, work, data) != 0U)) {
         (void)jtag_rx_take(self, work);
         self->state->mpsse.remaining--;
         if (self->state->mpsse.remaining == 0U) {
@@ -250,21 +266,29 @@ static void jtag_process_shift(const JTAGManager *const self, JtagServiceWork *c
     suppress_gpio = jtag_gowin_capture_program_data(self, data, bits);
 
     if (program_dr32_tail != 0U) {
+        jtag_toggle_begin(work);
         self->config->io->ops->clock_program_dr32(
             self->config->io, self->state->gowin.program_word, data);
         self->state->gowin.program_word_stage = 0U;
         work->clocks_left -= 32U;
     } else if (suppress_gpio != 0U) {
         /* 24+7+1 位要到最后一条 TMS 命令才一次性产生全部 32 个时钟。 */
-    } else if ((self->state->mpsse.opcode & MPSSE_WRITE_TMS) != 0U) {
-        reply = self->config->io->ops->shift_tms(self->config->io, data, bits);
-    } else if ((self->state->mpsse.opcode & MPSSE_LSB_FIRST) != 0U) {
-        reply = self->config->io->ops->shift_lsb(self->config->io, data, bits);
-    } else if ((self->state->mpsse.opcode & MPSSE_BIT_MODE) != 0U) {
-        /* BL702 的 MSB 位命令只有 0x13/0x17，仅输出，不采样 TDO。 */
-        self->config->io->ops->shift_msb_output(self->config->io, data, bits);
     } else {
-        reply = self->config->io->ops->shift_msb(self->config->io, data, bits);
+        jtag_toggle_begin(work);
+        if ((self->state->mpsse.opcode & MPSSE_WRITE_TMS) != 0U) {
+            reply = self->config->io->ops->shift_tms(
+                self->config->io, data, bits);
+        } else if ((self->state->mpsse.opcode & MPSSE_LSB_FIRST) != 0U) {
+            reply = self->config->io->ops->shift_lsb(
+                self->config->io, data, bits);
+        } else if ((self->state->mpsse.opcode & MPSSE_BIT_MODE) != 0U) {
+            /* BL702 的 MSB 位命令只有 0x13/0x17，仅输出，不采样 TDO。 */
+            self->config->io->ops->shift_msb_output(
+                self->config->io, data, bits);
+        } else {
+            reply = self->config->io->ops->shift_msb(
+                self->config->io, data, bits);
+        }
     }
 
     if ((self->state->mpsse.opcode & MPSSE_READ_TDO) != 0U) {
@@ -284,7 +308,8 @@ static void jtag_process_shift(const JTAGManager *const self, JtagServiceWork *c
 }
 
 static uint8_t jtag_gowin_long_clock_byte(const JTAGManager *const self,
-                                           uint8_t data)
+                                          JtagServiceWork *const work,
+                                          uint8_t data)
 {
     JtagGowinState *const gowin = &self->state->gowin;
 
@@ -303,6 +328,7 @@ static uint8_t jtag_gowin_long_clock_byte(const JTAGManager *const self,
     }
 
     gowin->long_clock_suppress = 1U;
+    jtag_toggle_begin(work);
     self->config->io->ops->clock_erase(self->config->io);
     return 1U;
 }

@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "Hook.h"
 #include "UartForwardConfig.h"
 #include "ch32v20x.h"
 
@@ -254,6 +255,7 @@ static void uart2_dma_rx_consume(const ByteStreamPort *const self,
 
     /* consumed 只由主循环写，DMA 与中断只推进生产端，不需要扩大临界区。 */
     uart->state->rx_consumed += length;
+    Hook_UartReceived(length);
 }
 
 static ByteStreamPortResult uart2_dma_tx_write(
@@ -395,12 +397,15 @@ static void uart2_dma_service_tx(const Uart2Dma *const self)
     if ((state->tx_dma_active != 0U) &&
         ((dma_flags & self->config->tx_dma_complete_flag) != 0U))
     {
+        const uint16_t completed_length = state->tx_dma_length;
+
         self->config->tx_dma->CFGR &= ~(uint32_t)DMA_CFGR1_EN;
         self->config->usart->CTLR3 &= (uint16_t)~USART_CTLR3_DMAT;
         self->config->dma->INTFCR = self->config->tx_dma_global_flag;
         state->tx_consumed += state->tx_dma_length;
         state->tx_dma_length = 0U;
         state->tx_dma_active = 0U;
+        Hook_UartSent(completed_length);
     }
 
     if ((state->tx_dma_active == 0U) &&

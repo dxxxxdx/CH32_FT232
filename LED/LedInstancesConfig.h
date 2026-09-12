@@ -1,0 +1,20 @@
+#ifndef CH32_FT232_LED_INSTANCES_CONFIG_H
+#define CH32_FT232_LED_INSTANCES_CONFIG_H
+
+/* 当前板子的 PB0 运行灯。无 LED 的板子由构建参数关闭整个实例。 */
+#ifndef RUN_LED_ENABLED
+#define RUN_LED_ENABLED (1U)
+#endif
+
+#if (RUN_LED_ENABLED != 0U) && (RUN_LED_ENABLED != 1U)
+#error "RUN_LED_ENABLED must be 0 or 1"
+#endif
+
+#if RUN_LED_ENABLED != 0U
+#define RUN_LED_GPIO_PORT            GPIOB
+#define RUN_LED_GPIO_PORT_CLOCK      RCC_IOPBEN
+#define RUN_LED_GPIO_PIN_NUMBER      (0U)
+#define RUN_LED_SERVICE_PERIOD_TICKS (72000000UL)
+#endif
+
+#endif /* CH32_FT232_LED_INSTANCES_CONFIG_H */

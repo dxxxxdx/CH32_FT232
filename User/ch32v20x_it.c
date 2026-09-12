@@ -10,6 +10,7 @@
 * microcontroller manufactured by Nanjing Qinheng Microelectronics.
 *******************************************************************************/
 #include "ch32v20x_it.h"
+#include "Hook.h"
 
 void NMI_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 void HardFault_Handler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
@@ -37,6 +38,8 @@ void NMI_Handler(void)
  */
 void HardFault_Handler(void)
 {
+  /* 钩子位于异常上下文，板级实现不能依赖中断或调度继续运行。 */
+  Hook_HardFault();
   NVIC_SystemReset();
   while (1)
   {
