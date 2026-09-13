@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+#include "UartForwardConfig.h"
 #include "byteStreamPort.h"
 
 typedef enum
@@ -45,8 +46,24 @@ void UartForwardService_Init(const UartForwardService *self);
 UartForwardServiceResult UartForwardService_Service(
     const UartForwardService *self);
 
+#if UART_FORWARD_ENABLED != 0U
 void UartForwardService0_Init(void);
 void UartForwardService0_Poll(void);
 UartForwardServiceResult UartForwardService0_LastResult(void);
+#else
+/* 关闭转发时 main 仍维持固定服务拓扑；空实现不会引用 CDC、USART 或 DMA。 */
+static inline void UartForwardService0_Init(void)
+{
+}
+
+static inline void UartForwardService0_Poll(void)
+{
+}
+
+static inline UartForwardServiceResult UartForwardService0_LastResult(void)
+{
+    return UART_FORWARD_SERVICE_IDLE;
+}
+#endif
 
 #endif /* CH32_FT232_UART_FORWARD_SERVICE_H */

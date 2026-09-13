@@ -20,7 +20,10 @@ void Led_Init(const Led *const self)
 {
     LedState *const state = self->state;
 
-    RCC->APB2PCENR |= self->config->port_clock;
+    RCC->APB2PCENR |= self->config->port_clock | RCC_AFIOEN;
+    *self->config->remap_register =
+        (*self->config->remap_register & ~self->config->remap_mask) |
+        self->config->remap_value;
 
     /* 先写入灭灯电平再切输出，避免初始化瞬间闪一下。 */
     if (self->config->active_level == LED_ACTIVE_LOW)

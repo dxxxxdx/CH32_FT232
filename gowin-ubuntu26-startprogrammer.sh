@@ -99,9 +99,9 @@ TRACE_LOG="$LOG_DIR/gowin-usb-$RUN_STAMP.log"
 APP_LOG="$ROOT/$(date '+%Y-%m-%d').log"
 APP_LOG_START=0
 APP_LOG_CAPTURED=0
-LIBUSB_DEBUG_LEVEL="${GOWIN_LIBUSB_DEBUG:-4}"
+LIBUSB_DEBUG_LEVEL="${GOWIN_LIBUSB_DEBUG:-1}"
 CLAIM_TRACE="${GOWIN_USB_CLAIM_TRACE:-1}"
-URB_TRACE="${GOWIN_USB_URB_TRACE:-1}"
+URB_TRACE="${GOWIN_USB_URB_TRACE:-0}"
 
 case "$LIBUSB_DEBUG_LEVEL" in
     0|1|2|3|4) ;;
@@ -111,12 +111,20 @@ case "$LIBUSB_DEBUG_LEVEL" in
         ;;
 esac
 
+case "$CLAIM_TRACE:$URB_TRACE" in
+    [01]:[01]) ;;
+    *)
+        echo "GOWIN_USB_CLAIM_TRACE 和 GOWIN_USB_URB_TRACE 只能是 0 或 1。" >&2
+        exit 1
+        ;;
+esac
+
 mkdir -p -- "$LOG_DIR"
 if [[ -f "$APP_LOG" ]]; then
     APP_LOG_START="$(stat -c '%s' "$APP_LOG")"
 fi
 
-# 启动器、libusb 和内嵌 Python 的 stderr 全部同时送到终端与单次运行日志。
+# 正常运行只记录 libusb 错误；完整 URB 跟踪由环境变量显式打开。
 exec > >(tee -a "$TRACE_LOG") 2>&1
 
 declare -a UNBOUND_IFACES=()
@@ -536,6 +544,7 @@ echo "VID:PID：$(<"$USB_SYS/$TARGET/idVendor"):$(<"$USB_SYS/$TARGET/idProduct")
 echo "USB 速度：$(<"$USB_SYS/$TARGET/speed") Mbit/s"
 echo "内置 libusb：$ROOT/libusb-1.0.so"
 echo "系统 libusb：$(pkg-config --modversion libusb-1.0 2>/dev/null || echo unknown)"
+echo "本次使用 libusb：高云内置版本"
 echo "LIBUSB_DEBUG：$LIBUSB_DEBUG_LEVEL"
 echo "USBFS URB 十六进制跟踪：$URB_TRACE"
 echo "诊断日志：$TRACE_LOG"

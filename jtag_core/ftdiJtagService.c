@@ -6,8 +6,7 @@ typedef enum
 {
     FTDI_JTAG_PUMP_IDLE = 0,
     FTDI_JTAG_PUMP_PROGRESS,
-    FTDI_JTAG_PUMP_WAIT,
-    FTDI_JTAG_PUMP_RX_TRANSFER_OVERFLOW
+    FTDI_JTAG_PUMP_WAIT
 } FtdiJtagPumpResult;
 
 static FtdiJtagServiceResult ftdi_jtag_handle_events(const FtdiJtagService *self);
@@ -40,7 +39,6 @@ void FtdiJtagService0_Poll(void)
     case FTDI_JTAG_SERVICE_PROGRESS:
     case FTDI_JTAG_SERVICE_WAIT_CONFIGURATION:
     case FTDI_JTAG_SERVICE_BACKPRESSURE:
-    case FTDI_JTAG_SERVICE_RX_TRANSFER_OVERFLOW:
     case FTDI_JTAG_SERVICE_MPSSE_FAULT:
         /* 外部 MPSSE/transfer 错误保持明确状态，等待主机 reset 重新同步。 */
         break;
@@ -102,10 +100,6 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
         waiting = 1U;
     }
     pump_result = ftdi_jtag_pump_port_rx(self);
-    if (pump_result == FTDI_JTAG_PUMP_RX_TRANSFER_OVERFLOW)
-    {
-        return FTDI_JTAG_SERVICE_RX_TRANSFER_OVERFLOW;
-    }
     if (pump_result == FTDI_JTAG_PUMP_PROGRESS)
     {
         progressed = 1U;
@@ -116,14 +110,15 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
     }
 
     /* OUT 搬运期间到达的 reset/purge 必须先使刚入队的旧命令失效。
-     * 从复查事件到本轮 GPIO 完成始终锁住数据 port，包边界不能插进
-     * Gowin 页、DR32 或长擦除时钟中间。
+     * 从复查事件到本轮 GPIO 完成始终锁住数据 port，防止下一个
+     * USB OUT 中断插入 Gowin 的 IR、DR32 或擦除时钟。
      */
     irq_token = self->config->port->ops->interrupt_lock(self->config->port);
     result = ftdi_jtag_handle_events(self);
     if (result != FTDI_JTAG_SERVICE_IDLE)
     {
-        self->config->port->ops->interrupt_unlock(self->config->port, irq_token);
+        self->config->port->ops->interrupt_unlock(self->config->port,
+                                                   irq_token);
         return result;
     }
 
@@ -131,10 +126,6 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
                                          self->config->clock_budget);
     self->config->port->ops->interrupt_unlock(self->config->port, irq_token);
     result = ftdi_jtag_map_manager_result(manager_result);
-    if (result == FTDI_JTAG_SERVICE_RX_TRANSFER_OVERFLOW)
-    {
-        return result;
-    }
     if (result == FTDI_JTAG_SERVICE_MPSSE_FAULT)
     {
         return result;
@@ -145,7 +136,8 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
     }
 
     /* OUT 和 Manager 都推进后再次检查真实回复。只有 31 60 的兼容状态包
-     * 由 USB port service 延迟产生；JTAG 层不能把它混入解析器 TX 队列。
+     * 由 USB 层在 latency 到期后管理；JTAG 层不能把它混入
+     * 解析器 TX 队列。
      */
     pump_result = ftdi_jtag_pump_port_tx(self);
     if (pump_result == FTDI_JTAG_PUMP_PROGRESS)
@@ -157,10 +149,6 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
         waiting = 1U;
     }
     pump_result = ftdi_jtag_pump_port_rx(self);
-    if (pump_result == FTDI_JTAG_PUMP_RX_TRANSFER_OVERFLOW)
-    {
-        return FTDI_JTAG_SERVICE_RX_TRANSFER_OVERFLOW;
-    }
     if (pump_result == FTDI_JTAG_PUMP_PROGRESS)
     {
         progressed = 1U;
@@ -241,8 +229,7 @@ static FtdiJtagPumpResult ftdi_jtag_pump_port_rx(const FtdiJtagService *const se
         return FTDI_JTAG_PUMP_IDLE;
     }
     rx_result = JTAGManager_RxWritePacket(
-        self->config->jtag, data, length,
-        (length < MPSSE_PORT_RX_PACKET_SIZE) ? 1U : 0U);
+        self->config->jtag, data, length);
     if (rx_result == JTAG_RX_PACKET_BACKPRESSURE)
     {
         return FTDI_JTAG_PUMP_WAIT;
@@ -252,13 +239,6 @@ static FtdiJtagPumpResult ftdi_jtag_pump_port_rx(const FtdiJtagService *const se
         self->config->port->ops->rx_consume(self->config->port);
         return FTDI_JTAG_PUMP_PROGRESS;
     }
-    if (rx_result == JTAG_RX_PACKET_TRANSFER_OVERFLOW)
-    {
-        /* 故障已由 manager 固化；释放 USB 邮箱，等待主机 reset 重新同步。 */
-        self->config->port->ops->rx_consume(self->config->port);
-        return FTDI_JTAG_PUMP_RX_TRANSFER_OVERFLOW;
-    }
-
     /* EP2 已保证 1..64 字节且邮箱数据有效，命中表示内部边界契约损坏。 */
     __builtin_trap();
 }
@@ -304,14 +284,11 @@ static FtdiJtagServiceResult ftdi_jtag_map_manager_result(JtagServiceResult resu
     case JTAG_SERVICE_IDLE:
     case JTAG_SERVICE_WAIT_RX:
     case JTAG_SERVICE_WAIT_TX:
-    case JTAG_SERVICE_WAIT_TRANSFER:
         return FTDI_JTAG_SERVICE_IDLE;
     case JTAG_SERVICE_BUDGET_REACHED:
         return FTDI_JTAG_SERVICE_PROGRESS;
     case JTAG_SERVICE_INVALID_ARGUMENT:
         return FTDI_JTAG_SERVICE_MPSSE_FAULT;
-    case JTAG_SERVICE_RX_TRANSFER_OVERFLOW:
-        return FTDI_JTAG_SERVICE_RX_TRANSFER_OVERFLOW;
     default:
         __builtin_trap();
     }

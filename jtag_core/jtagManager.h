@@ -43,17 +43,17 @@ typedef struct {
     uint8_t argument_count;
 } JtagMpsseState;
 
-/* Gowin 特例只由 manager 修改。USB 层只说明一个 64 字节包是否为 bulk
- * transfer 的短包结尾，不再维护页缓存、编程阶段或 DR32 影子状态。
+/* Gowin 特例只由 manager 修改。USB 层只投递连续的 MPSSE 字节流，
+ * 不维护页缓存、编程阶段或 DR32 影子状态。
  */
 typedef struct {
-    uint8_t transfer_collecting;
-    uint8_t transfer_ready;
-    uint8_t transfer_overflow;
     uint8_t long_clock_candidate;
     uint8_t long_clock_suppress;
     uint8_t ir_pending;
     uint8_t ir_low7;
+    uint8_t tap_state;
+    uint8_t current_instruction;
+    uint8_t erase_wait_clocked;
     uint8_t program_active;
     uint8_t program_word[4];
     uint8_t program_word_stage;
@@ -98,18 +98,15 @@ typedef enum {
     JTAG_SERVICE_IDLE = 0,
     JTAG_SERVICE_WAIT_RX,
     JTAG_SERVICE_WAIT_TX,
-    JTAG_SERVICE_WAIT_TRANSFER,
     JTAG_SERVICE_BUDGET_REACHED,
-    JTAG_SERVICE_INVALID_ARGUMENT,
-    JTAG_SERVICE_RX_TRANSFER_OVERFLOW
+    JTAG_SERVICE_INVALID_ARGUMENT
 } JtagServiceResult;
 
 typedef enum {
     JTAG_RX_PACKET_ACCEPTED = 0,
     JTAG_RX_PACKET_BACKPRESSURE,
     JTAG_RX_PACKET_INVALID_LENGTH,
-    JTAG_RX_PACKET_INVALID_DATA,
-    JTAG_RX_PACKET_TRANSFER_OVERFLOW
+    JTAG_RX_PACKET_INVALID_DATA
 } JtagRxPacketResult;
 
 /* 对象在编译期完成装配；Init 仅复位解析进度、标志及 RX/TX 索引。
@@ -134,16 +131,13 @@ void JTAGManager_Reset(const JTAGManager *self);
 void JTAGManager_RxPurge(const JTAGManager *self);
 void JTAGManager_TxPurge(const JTAGManager *self);
 
-/* 每次完整接收一个 Full Speed bulk 包，short_packet 表明 length<64，即当前
- * libusb transfer 已结束。普通流立即可执行；含 Gowin 页头的 transfer 先收齐
- * 再提交。页头仅在空 RX 的首包前 32 字节查找，保持 BL702 的识别边界。
- * 单包必须为 1..64 字节。普通空间不足返回 BACKPRESSURE 且不接收；正在收页
- * 时容量不足转成独立 OVERFLOW 故障，等待 Reset/RxPurge 清除。
+/* 每次接收一个 Full Speed bulk 包并立即并入连续 MPSSE 流。USB transfer
+ * 可能被主机合并为任意长度，不能据此推断 Gowin 页边界。单包必须为
+ * 1..64 字节，空间不足返回 BACKPRESSURE 且不接收。
  */
 JtagRxPacketResult JTAGManager_RxWritePacket(const JTAGManager *self,
                                              const uint8_t *data,
-                                             uint16_t length,
-                                             uint8_t short_packet);
+                                             uint16_t length);
 
 /* 推进增量解析和 GPIO 移位，普通路径最多产生 clock_budget 个 TCK 周期。
  * clock_budget 建议至少为 8；不足以执行下一个完整操作时返回预算耗尽。
@@ -156,12 +150,13 @@ JtagRxPacketResult JTAGManager_RxWritePacket(const JTAGManager *self,
  * 0x80/0x82/0x86 仅消费两个参数；0x81/0x83 回复 01/03；0x87 仅消费。
  * Loopback、分频和其它初始化兼容命令保持 BL702 的占位行为；0x86 的
  * 两字节分频参数始终丢弃，TCK 只由当前 GPIO 移位实现的固定档位决定。
- * Gowin 原子路径不受普通轮询预算拆分：页数据在完整 bulk transfer 到达后一次处理；0x71 编程 IR 后，把
- * 0x11/24 bit、0x13/7 bit、0x4B/末位合成连续 DR32。大于等于 8000 字节的
- * 无读回零流按 BL702 行为输出连续 150000 个擦除时钟。
+ * Gowin 原子路径不受 USB 分包影响：0x71 编程 IR 后，把 0x11/24 bit、
+ * 0x13/7 bit、0x4B/末位合成连续 DR32。Flash 控制流
+ * 依据 TAP 状态区分 IR 与 DR；只有 0x75 后的大块零等待流才替换成一次
+ * 固定连续擦除窗口，不能把普通配置数据或同一等待流的后续分块误判进去。
  * 内核不处理传输 latency，也不等待外层发送完成；Service 每轮优先推进 TX。
- * Manager 自身不改变中断状态；调用者须在本次调用外屏蔽数据源中断，保证
- * 页、DR32 和长擦除时钟不被 USB ISR 切开。
+ * Manager 自身不改变中断状态；调用者通过数据 port 的临界区
+ * 保证一次 Service 内的 GPIO 时序不被新 USB 包打断。
  */
 JtagServiceResult JTAGManager_Service(const JTAGManager *self,
                                       uint32_t clock_budget);

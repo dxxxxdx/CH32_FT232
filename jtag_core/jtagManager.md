@@ -43,25 +43,22 @@ Manager 通过 `JtagRingBufferOps` 的 `clear/used/free/front/take/put/write/pee
 
 ## GPIO 边界
 
-根目录 `GPIO_Cfg.h` 集中放置四个独立的静态引脚对象，
-`gpio_toggle/GPIO_Cfg.c` 只保留初始化和寄存器翻转实现：
-
-- TCK：PB13，输出
-- TDI：PB15，输出
-- TMS：PB14，输出
-- TDO：PA8，输入
+根目录 `GPIO_Cfg.h` 根据板级宏生成四个独立的静态引脚对象，
+`gpio_toggle/GPIO_Cfg.c` 只保留初始化和寄存器翻转实现。
 
 JTAG 核只调用 `JtagIoOps` 的命令级操作。逐边沿仍直接读写 CH32 的
-`OUTDR/INDR`；普通 LSB/MSB/TMS 移位、Gowin DR32 合并和 150000 周期擦除
-保持原来的寄存器顺序和延时。
+`OUTDR/INDR`；普通 LSB/MSB/TMS 移位和 Gowin DR32 合并保持原来的
+寄存器顺序和延时。Gowin Flash 控制流跟踪 TAP/IR，`0x75` 后只输出一次
+约 180ms 的连续擦除窗口，不依赖主机声明的 MPSSE 时钟档位。
 
 ## 保持不变的协议行为
 
 - MPSSE 解析状态跨 USB 包保留。
 - 一个 64 字节 OUT 包空间不足时整包背压，不做部分复制。
-- Gowin 页头仍只在空 RX 的首包前 32 字节搜索，并等短包提交整页。
+- USB 包持续并入 MPSSE 流，不把 libusb transfer 长度误当成 Gowin 页边界。
 - `4B 07 7F` 仍按八个 TMS 时钟执行。
 - `0x86` 两个分频参数仍直接丢弃，TCK 使用当前固定档位。
 - 未知命令仍回复 `FA opcode`。
-- reset、两种 purge、overflow 和 MPSSE fault 的映射顺序不变。
-- Service 仍在 Gowin 页、DR32 和擦除路径外围屏蔽 USBD IRQ。
+- reset、两种 purge 和 MPSSE fault 的映射顺序不变。
+- Manager 执行 GPIO 时由 port 临界区屏蔽 USBD IRQ；硬件端点保持 NAK，
+  完成不可拆分时序后再继续接收 bulk OUT。

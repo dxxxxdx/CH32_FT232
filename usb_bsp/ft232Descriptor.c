@@ -70,6 +70,7 @@ const uint8_t FtdiUsbConfigurationDescriptor[FTDI_USB_CONFIG_DESC_SIZE]
     USB_U16_HIGH(FTDI_USB_BULK_PACKET_SIZE),
     0x00U,
 
+#if UART_FORWARD_ENABLED != 0U
     /* IAD 把接口 2/3 明确归为一个 CDC ACM 功能，同时保留前两个 FTDI
      * vendor interface 的编号和端点不变。
      */
@@ -121,6 +122,7 @@ const uint8_t FtdiUsbConfigurationDescriptor[FTDI_USB_CONFIG_DESC_SIZE]
     USB_U16_LOW(FTDI_USB_CDC_DATA_PACKET_SIZE),
     USB_U16_HIGH(FTDI_USB_CDC_DATA_PACKET_SIZE),
     0x00U
+#endif
 };
 
 const uint8_t FtdiUsbLanguageDescriptor[FTDI_USB_LANG_DESC_SIZE]
@@ -187,5 +189,7 @@ _Static_assert(FTDI_USB_BULK_PACKET_SIZE == 64U,
                "CH32 USB Full Speed bulk endpoint must use 64-byte packets");
 _Static_assert(FTDI_USB_IN_DATA_SIZE == 62U,
                "FTDI IN packet reserves two status bytes");
+#if UART_FORWARD_ENABLED != 0U
 _Static_assert(FTDI_USB_CDC_DATA_PACKET_SIZE == 16U,
                "CDC PMA allocation is sized for 16-byte bulk packets");
+#endif

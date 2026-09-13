@@ -1,6 +1,7 @@
 #include "jtagManager.h"
 
 #include "Hook.h"
+#include "jtagGowinFlash.h"
 
 /* 命令集合与普通 GPIO 时序来源：BL702 firmware/app/usb2uartjtag/jtag_process.c。
  * 这里仅承接已经去掉 USB 层的 MPSSE 字节流，不增加新的命令语义。
@@ -10,7 +11,6 @@
 #define MPSSE_READ_TDO (0x20U)
 #define MPSSE_WRITE_TMS (0x40U)
 #define MPSSE_BAD_COMMAND (0xFAU)
-#define MPSSE_LONG_CLOCK_MIN_BYTES (8000U)
 /* 单次 service 的短期调度状态，长期解析状态全部保留在 self->state->mpsse。 */
 typedef struct {
     uint32_t clocks_left;
@@ -27,37 +27,19 @@ static void jtag_stop(JtagServiceWork *const work, JtagServiceResult result);
 static void jtag_toggle_begin(JtagServiceWork *work);
 static uint8_t jtag_rx_take(const JTAGManager *const self, JtagServiceWork *const work);
 static void jtag_tx_put(const JTAGManager *const self, uint8_t value);
-static uint8_t jtag_gowin_long_clock_byte(const JTAGManager *self,
-                                          JtagServiceWork *work,
-                                          uint8_t data);
-static uint8_t jtag_gowin_capture_program_data(const JTAGManager *self,
-                                                uint8_t data,
-                                                uint8_t bits);
-static uint8_t jtag_gowin_is_program_dr32_tail(const JTAGManager *self,
-                                                uint8_t bits);
-static void jtag_gowin_observe_ir(const JTAGManager *self,
-                                  uint8_t data,
-                                  uint8_t bits);
 
 JTAG_MANAGER_DEFINE(JTAGManager0, JtagIo0);
 
 JtagServiceResult JTAGManager_Service(const JTAGManager *const self, uint32_t clock_budget)
 {
     JtagServiceWork work = {
-        .clocks_left = (self->state->gowin.transfer_ready != 0U)
-                           ? 0xFFFFFFFFUL : clock_budget,
+        .clocks_left = clock_budget,
         .input_left = self->config->rx->ops->used(self->config->rx),
         .stopped = 0U,
         .toggle_hook_fired = 0U,
         .result = JTAG_SERVICE_IDLE
     };
 
-    if (self->state->gowin.transfer_overflow != 0U) {
-        return JTAG_SERVICE_RX_TRANSFER_OVERFLOW;
-    }
-    if (self->state->gowin.transfer_collecting != 0U) {
-        return JTAG_SERVICE_WAIT_TRANSFER;
-    }
     if (self->state->mpsse.phase == JTAG_MPSSE_FAULT) {
         return JTAG_SERVICE_INVALID_ARGUMENT;
     }
@@ -79,10 +61,6 @@ JtagServiceResult JTAGManager_Service(const JTAGManager *const self, uint32_t cl
         }
     }
 
-    if ((self->state->gowin.transfer_ready != 0U) &&
-        (self->config->rx->ops->used(self->config->rx) == 0U)) {
-        self->state->gowin.transfer_ready = 0U;
-    }
     if (work.stopped != 0U) {
         return work.result;
     }
@@ -216,9 +194,9 @@ static void jtag_process_arguments(const JTAGManager *const self, JtagServiceWor
             ((uint32_t)self->state->mpsse.arguments[0] |
              ((uint32_t)self->state->mpsse.arguments[1] << 8U)) + 1U;
         self->state->gowin.long_clock_candidate =
-            (((self->state->mpsse.opcode & MPSSE_READ_TDO) == 0U) &&
-             (self->state->mpsse.remaining >= MPSSE_LONG_CLOCK_MIN_BYTES))
-                ? 1U : 0U;
+            JtagGowinFlash_IsEraseWaitCandidate(
+                self, self->state->mpsse.opcode,
+                self->state->mpsse.remaining);
         self->state->gowin.long_clock_suppress = 0U;
         self->state->mpsse.phase = JTAG_MPSSE_SHIFT;
     }
@@ -232,6 +210,7 @@ static void jtag_process_shift(const JTAGManager *const self, JtagServiceWork *c
         ((self->state->mpsse.opcode & MPSSE_BIT_MODE) == 0U) ? 1U : 0U;
     uint8_t program_dr32_tail;
     uint8_t suppress_gpio;
+    JtagGowinLongClockAction long_clock_action;
     uint8_t reply = 0U;
     uint8_t data;
 
@@ -243,8 +222,14 @@ static void jtag_process_shift(const JTAGManager *const self, JtagServiceWork *c
     }
 
     data = self->config->rx->ops->front(self->config->rx);
-    if ((byte_mode != 0U) &&
-        (jtag_gowin_long_clock_byte(self, work, data) != 0U)) {
+    long_clock_action = (byte_mode != 0U)
+                            ? JtagGowinFlash_LongClockByte(self, data)
+                            : JTAG_GOWIN_LONG_CLOCK_PASSTHROUGH;
+    if (long_clock_action != JTAG_GOWIN_LONG_CLOCK_PASSTHROUGH) {
+        if (long_clock_action == JTAG_GOWIN_LONG_CLOCK_ERASE) {
+            jtag_toggle_begin(work);
+            self->config->io->ops->clock_erase(self->config->io);
+        }
         (void)jtag_rx_take(self, work);
         self->state->mpsse.remaining--;
         if (self->state->mpsse.remaining == 0U) {
@@ -254,16 +239,16 @@ static void jtag_process_shift(const JTAGManager *const self, JtagServiceWork *c
         return;
     }
 
-    program_dr32_tail = jtag_gowin_is_program_dr32_tail(self, bits);
+    program_dr32_tail = JtagGowinFlash_IsProgramDr32Tail(self, bits);
     if (work->clocks_left < ((program_dr32_tail != 0U) ? 32U : bits)) {
         jtag_stop(work, JTAG_SERVICE_BUDGET_REACHED);
         return;
     }
 
     data = jtag_rx_take(self, work);
-    jtag_gowin_observe_ir(self, data, bits);
-    program_dr32_tail = jtag_gowin_is_program_dr32_tail(self, bits);
-    suppress_gpio = jtag_gowin_capture_program_data(self, data, bits);
+    JtagGowinFlash_ObserveInstruction(self, data, bits);
+    program_dr32_tail = JtagGowinFlash_IsProgramDr32Tail(self, bits);
+    suppress_gpio = JtagGowinFlash_CaptureProgramData(self, data, bits);
 
     if (program_dr32_tail != 0U) {
         jtag_toggle_begin(work);
@@ -304,104 +289,5 @@ static void jtag_process_shift(const JTAGManager *const self, JtagServiceWork *c
     }
     if (self->state->mpsse.remaining == 0U) {
         self->state->mpsse.phase = JTAG_MPSSE_COMMAND;
-    }
-}
-
-static uint8_t jtag_gowin_long_clock_byte(const JTAGManager *const self,
-                                          JtagServiceWork *const work,
-                                          uint8_t data)
-{
-    JtagGowinState *const gowin = &self->state->gowin;
-
-    if (gowin->long_clock_suppress != 0U) {
-        /* 首字节已经一次性输出完整擦除时钟，余下零流只维持 MPSSE 对齐。 */
-        return 1U;
-    }
-    if (gowin->long_clock_candidate == 0U) {
-        return 0U;
-    }
-
-    gowin->long_clock_candidate = 0U;
-    if (data != 0U) {
-        /* 普通的大块配置数据不能误判成擦除空时钟。 */
-        return 0U;
-    }
-
-    gowin->long_clock_suppress = 1U;
-    jtag_toggle_begin(work);
-    self->config->io->ops->clock_erase(self->config->io);
-    return 1U;
-}
-
-static uint8_t jtag_gowin_capture_program_data(const JTAGManager *const self,
-                                                uint8_t data,
-                                                uint8_t bits)
-{
-    JtagGowinState *const gowin = &self->state->gowin;
-    const JtagMpsseState *const mpsse = &self->state->mpsse;
-
-    if (gowin->program_active == 0U) {
-        return 0U;
-    }
-
-    if (mpsse->opcode == 0x11U) {
-        const uint32_t initial =
-            ((uint32_t)mpsse->arguments[0] |
-             ((uint32_t)mpsse->arguments[1] << 8U)) + 1U;
-
-        if (initial == 3U) {
-            const uint8_t byte_index = (uint8_t)(initial - mpsse->remaining);
-
-            if ((byte_index < 3U) && (gowin->program_word_stage == byte_index)) {
-                gowin->program_word[byte_index] = data;
-                gowin->program_word_stage++;
-                return 1U;
-            }
-            gowin->program_active = 0U;
-            gowin->program_word_stage = 0U;
-        }
-    } else if ((mpsse->opcode == 0x13U) && (bits == 7U)) {
-        if (gowin->program_word_stage == 3U) {
-            gowin->program_word[3] = data;
-            gowin->program_word_stage = 4U;
-            return 1U;
-        }
-        gowin->program_active = 0U;
-        gowin->program_word_stage = 0U;
-    }
-    return 0U;
-}
-
-static uint8_t jtag_gowin_is_program_dr32_tail(const JTAGManager *const self,
-                                                uint8_t bits)
-{
-    return ((self->state->gowin.program_active != 0U) &&
-            (self->state->mpsse.opcode == 0x4BU) &&
-            (bits == 1U) &&
-            (self->state->gowin.program_word_stage == 4U)) ? 1U : 0U;
-}
-
-static void jtag_gowin_observe_ir(const JTAGManager *const self,
-                                  uint8_t data,
-                                  uint8_t bits)
-{
-    JtagGowinState *const gowin = &self->state->gowin;
-    const uint8_t opcode = self->state->mpsse.opcode;
-
-    if ((opcode == 0x1BU) && (bits == 7U)) {
-        /* Gowin 用 0x1B 给出 IR 低七位，最后一位借下一条 TMS 的 bit7。 */
-        gowin->ir_low7 = (uint8_t)(data & 0x7FU);
-        gowin->ir_pending = 1U;
-    }
-
-    if (((opcode & MPSSE_WRITE_TMS) != 0U) && (gowin->ir_pending != 0U)) {
-        if (bits == 1U) {
-            const uint8_t instruction =
-                (uint8_t)(gowin->ir_low7 | (uint8_t)(data & 0x80U));
-
-            gowin->program_active = (instruction == 0x71U) ? 1U : 0U;
-            gowin->program_word_stage = 0U;
-        }
-        gowin->ir_pending = 0U;
     }
 }

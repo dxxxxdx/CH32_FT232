@@ -42,13 +42,13 @@ static void jtag_clear_parser(JtagMpsseState *const state)
 
 static void jtag_clear_gowin(JtagGowinState *const state)
 {
-    state->transfer_collecting = 0U;
-    state->transfer_ready = 0U;
-    state->transfer_overflow = 0U;
     state->long_clock_candidate = 0U;
     state->long_clock_suppress = 0U;
     state->ir_pending = 0U;
     state->ir_low7 = 0U;
+    state->tap_state = 0U;
+    state->current_instruction = 0U;
+    state->erase_wait_clocked = 0U;
     state->program_active = 0U;
     state->program_word_stage = 0U;
     /* program_word 随 stage=0 失效，下一组 DR32 会完整覆盖，不浪费启动时间。 */

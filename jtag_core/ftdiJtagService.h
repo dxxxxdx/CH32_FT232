@@ -35,7 +35,7 @@ typedef struct
 #define FTDI_JTAG_SERVICE_FLASH __attribute__((section(".rodata.ftdi_jtag")))
 
 /* 组合根在文件作用域装配 port 与 JTAG 核。clock_budget 限制普通路径的单轮占用，
- * Gowin 页和擦除原子路径例外；它不参与 TCK 分频，主机 0x86 始终丢弃。
+ * Gowin 擦除原子路径例外；它不参与 TCK 分频，主机 0x86 始终丢弃。
  */
 #define FTDI_JTAG_SERVICE_DEFINE(name, port_object, jtag_object, budget)          \
     _Static_assert((budget) >= (MPSSE_PORT_RX_PACKET_SIZE * 8U),                  \
@@ -59,7 +59,6 @@ typedef enum
     FTDI_JTAG_SERVICE_BACKPRESSURE,
     FTDI_JTAG_SERVICE_PORT_RX_LENGTH_FAULT,
     FTDI_JTAG_SERVICE_PORT_RX_OVERWRITE_FAULT,
-    FTDI_JTAG_SERVICE_RX_TRANSFER_OVERFLOW,
     FTDI_JTAG_SERVICE_MPSSE_FAULT
 } FtdiJtagServiceResult;
 

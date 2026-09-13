@@ -6,8 +6,11 @@ LED_DEFINE(RunLed0,
            RUN_LED_GPIO_PORT,
            RUN_LED_GPIO_PORT_CLOCK,
            RUN_LED_GPIO_PIN_NUMBER,
-           LED_ACTIVE_LOW,
-           LED_OUTPUT_OPEN_DRAIN,
+           RUN_LED_ACTIVE_LEVEL,
+           RUN_LED_OUTPUT_TYPE,
+           RUN_LED_REMAP_REGISTER,
+           RUN_LED_REMAP_MASK,
+           RUN_LED_REMAP_VALUE,
            RUN_LED_SERVICE_PERIOD_TICKS);
 #endif
 

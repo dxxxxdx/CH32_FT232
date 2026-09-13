@@ -4,7 +4,16 @@
 #include "ch32v20x.h"
 
 #define JTAG_GPIO_FLASH __attribute__((section(".rodata.jtag_gpio")))
-#define JTAG_GOWIN_ERASE_CLOCKS (150000UL)
+/* 当前 GPIO 实测 TCK 约 2 MHz。Gowin 内置 Flash 擦除要求约 160 ms
+ * 连续时钟；额外留 20 ms 裕量，不能继续照搬 BL702 的 150000 脉冲。
+ */
+#define JTAG_FIXED_TCK_HZ             (2000000UL)
+#define JTAG_GOWIN_ERASE_TIME_US      (180000UL)
+#define JTAG_GOWIN_ERASE_CLOCKS       \
+    ((JTAG_FIXED_TCK_HZ / 1000000UL) * JTAG_GOWIN_ERASE_TIME_US)
+
+_Static_assert((JTAG_FIXED_TCK_HZ % 1000000UL) == 0UL,
+               "fixed TCK must convert to clocks/us at compile time");
 
 /* CH32V20x 每个 GPIO 配置占四位；模式值来自 GPIOx_CFGLR/CFGHR。 */
 #define GPIO_CFG_MODE_OUTPUT_PP_50MHZ (0x03UL)
@@ -23,6 +32,7 @@ typedef struct
     const GpioCfgPin *const tms;
 } JtagGpioPins;
 
+#if UART_FORWARD_ENABLED != 0U
 typedef struct
 {
     const GpioCfgPin *const tx;
@@ -31,11 +41,14 @@ typedef struct
     const uint32_t remap_mask;
     const uint32_t remap_value;
 } UartGpioRoute;
+#endif
 
 struct GpioCfg
 {
     const JtagGpioPins *const jtag;
+#if UART_FORWARD_ENABLED != 0U
     const UartGpioRoute *const uart;
+#endif
     const GpioCfgPin *const usbd_dm;
     const GpioCfgPin *const usbd_dp;
 };
@@ -71,6 +84,7 @@ static const JtagGpioPins jtag_gpio_pins JTAG_GPIO_FLASH = {
     .tms = &jtag_gpio_tms
 };
 
+#if UART_FORWARD_ENABLED != 0U
 static const UartGpioRoute uart_gpio_route GPIO_CFG_FLASH = {
     .tx = &uart_gpio_tx,
     .rx = &uart_gpio_rx,
@@ -78,6 +92,7 @@ static const UartGpioRoute uart_gpio_route GPIO_CFG_FLASH = {
     .remap_mask = UART_GPIO_REMAP_MASK,
     .remap_value = UART_GPIO_REMAP_VALUE
 };
+#endif
 
 static const JtagIoOps jtag_gpio_ops JTAG_GPIO_FLASH = {
     .shift_lsb = jtag_gpio_shift_lsb,
@@ -90,7 +105,9 @@ static const JtagIoOps jtag_gpio_ops JTAG_GPIO_FLASH = {
 
 const GpioCfg GpioCfg0 GPIO_CFG_FLASH = {
     .jtag = &jtag_gpio_pins,
+#if UART_FORWARD_ENABLED != 0U
     .uart = &uart_gpio_route,
+#endif
     .usbd_dm = &usbd_gpio_dm,
     .usbd_dp = &usbd_gpio_dp
 };
@@ -103,7 +120,9 @@ const JtagIo JtagIo0 JTAG_GPIO_FLASH = {
 void GPIO_Cfg_Init(const GpioCfg *const self)
 {
     const JtagGpioPins *const pins = self->jtag;
+#if UART_FORWARD_ENABLED != 0U
     const UartGpioRoute *const uart = self->uart;
+#endif
 
     /* 引脚对象可分布在不同端口，不在初始化器里暗藏第二份管脚映射。 */
     RCC->APB2PCENR |= RCC_AFIOEN;
@@ -111,10 +130,13 @@ void GPIO_Cfg_Init(const GpioCfg *const self)
     gpio_cfg_pin_clock_enable(pins->tdi);
     gpio_cfg_pin_clock_enable(pins->tdo);
     gpio_cfg_pin_clock_enable(pins->tms);
+#if UART_FORWARD_ENABLED != 0U
     gpio_cfg_pin_clock_enable(uart->tx);
     gpio_cfg_pin_clock_enable(uart->rx);
+#endif
     gpio_cfg_pin_clock_enable(self->usbd_dm);
     gpio_cfg_pin_clock_enable(self->usbd_dp);
+#if UART_FORWARD_ENABLED != 0U
     *uart->remap_register =
         (*uart->remap_register & ~uart->remap_mask) | uart->remap_value;
 
@@ -126,6 +148,7 @@ void GPIO_Cfg_Init(const GpioCfg *const self)
     gpio_cfg_pin_mode(uart->tx, GPIO_CFG_MODE_OUTPUT_PP_50MHZ);
     gpio_cfg_pin_mode(uart->rx, GPIO_CFG_MODE_INPUT_PULL);
     gpio_cfg_pin_mode(uart->tx, GPIO_CFG_MODE_AF_PP_50MHZ);
+#endif
 
     /* 先写低输出锁存，再逐脚切推挽输出，避免配置瞬间
      * 在 TCK/TMS 上产生伪上升沿。TDO 保持浮空，空闲高电平由板上拉高保证。
@@ -344,6 +367,9 @@ static void jtag_gpio_clock_erase(const JtagIo *const self)
 {
     const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
 
+    /* 擦除窗口只由 Gowin Flash 控制流调用一次；普通 GPIO 连续输出，
+     * 不依赖 PWM 引脚复用，也不受主机声明的虚假 MPSSE 档位影响。
+     */
     gpio_cfg_pin_reset(pins->tms);
     gpio_cfg_pin_reset(pins->tdi);
     for (uint32_t clock = 0U; clock < JTAG_GOWIN_ERASE_CLOCKS; clock++)

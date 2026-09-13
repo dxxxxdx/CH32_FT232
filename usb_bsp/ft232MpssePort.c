@@ -22,7 +22,8 @@ static MpssePortResult ft232_mpsse_tx_write(const MpssePort *self,
                                             const uint8_t *data,
                                             uint16_t length);
 static uint8_t ft232_mpsse_interrupt_lock(const MpssePort *self);
-static void ft232_mpsse_interrupt_unlock(const MpssePort *self, uint8_t token);
+static void ft232_mpsse_interrupt_unlock(const MpssePort *self,
+                                         uint8_t token);
 
 static const MpssePortOps ft232_mpsse_ops FT232_MPSSE_PORT_FLASH = {
     .enable = ft232_mpsse_enable,
