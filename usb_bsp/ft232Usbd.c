@@ -62,6 +62,7 @@ static void ft232_usbd_ep1_in(void);
 static void ft232_usbd_ep2_out(void);
 static void ft232_usbd_ep3_in(void);
 static void ft232_usbd_ep4_out(void);
+static void ft232_usbd_sof(void);
 static void ft232_usbd_port_set(uint8_t connected);
 static void ft232_usbd_interrupt_service(void);
 static Ft232UsbdChannelState *ft232_usbd_request_channel(Ft232UsbdState *state,
@@ -189,6 +190,7 @@ void Ft232Usbd_Init(const Ft232Usbd *const self)
         state->channel[channel].in_produced = 0U;
         state->channel[channel].in_consumed = 0U;
         state->channel[channel].latency_timer = FTDI_DEFAULT_LATENCY_TIMER;
+        state->channel[channel].latency_elapsed = 0U;
         state->channel[channel].bit_mode = FTDI_SIO_BITMODE_RESET;
     }
     state->control_reply_length = 0U;
@@ -289,6 +291,35 @@ Ft232UsbdResult Ft232Usbd_MpsseTxWrite(const Ft232Usbd *const self,
                                FTDI_USB_JTAG_IN_EP, ENDP1,
                                self->state->mpsse_in_packet,
                                (uint16_t)(FTDI_USB_STATUS_SIZE + length));
+}
+
+uint8_t Ft232Usbd_MpsseTxStatus(const Ft232Usbd *const self)
+{
+    Ft232UsbdState *const state = self->state;
+    Ft232UsbdChannelState *const channel =
+        &state->channel[FT232_USBD_JTAG_CHANNEL];
+    const uint8_t irq_was_enabled = Ft232Usbd_InterruptLock(self);
+    uint8_t submitted = 0U;
+
+    if ((state->configured != 0U) &&
+        (state->data_enabled != 0U) &&
+        (channel->bit_mode == FTDI_SIO_BITMODE_MPSSE) &&
+        (channel->latency_elapsed >= channel->latency_timer) &&
+        (channel->out_produced == channel->out_consumed) &&
+        (channel->in_produced == channel->in_consumed))
+    {
+        state->mpsse_in_packet[0] = FTDI_USB_MODEM_STATUS;
+        state->mpsse_in_packet[1] = FTDI_USB_LINE_STATUS;
+        (void)USB_SIL_Write(FTDI_USB_JTAG_IN_EP, state->mpsse_in_packet,
+                            FTDI_USB_STATUS_SIZE);
+        __asm volatile ("" ::: "memory");
+        channel->in_produced++;
+        channel->latency_elapsed = 0U;
+        SetEPTxValid(ENDP1);
+        submitted = 1U;
+    }
+    Ft232Usbd_InterruptUnlock(self, irq_was_enabled);
+    return submitted;
 }
 
 uint16_t Ft232Usbd_AuxRxPeek(const Ft232Usbd *const self,
@@ -616,6 +647,7 @@ static RESULT ft232_usbd_ftdi_no_data_setup(uint8_t request)
             return USB_UNSUPPORT;
         }
         channel->latency_timer = pInformation->USBwValue0;
+        channel->latency_elapsed = 0U;
         return USB_SUCCESS;
 
     case FTDI_SIO_SET_BITMODE_REQUEST:
@@ -626,6 +658,7 @@ static RESULT ft232_usbd_ftdi_no_data_setup(uint8_t request)
             return USB_UNSUPPORT;
         }
         channel->bit_mode = pInformation->USBwValue1;
+        channel->latency_elapsed = 0U;
         ft232_usbd_purge_device_in(channel, in_endpoint);
         if (channel_number == FT232_USBD_JTAG_CHANNEL)
         {
@@ -734,6 +767,8 @@ static void ft232_usbd_set_configuration(void)
 
     if (pInformation->Current_Configuration == FTDI_USB_CONFIGURATION_VALUE)
     {
+        state->channel[FT232_USBD_JTAG_CHANNEL].latency_elapsed = 0U;
+        state->channel[FT232_USBD_AUX_CHANNEL].latency_elapsed = 0U;
         state->configured = 1U;
         SetEPTxStatus(ENDP1, EP_TX_NAK);
         SetEPTxStatus(ENDP3, EP_TX_NAK);
@@ -805,6 +840,20 @@ static void ft232_usbd_ep4_out(void)
         Ft232Usbd0.state,
         &Ft232Usbd0.state->channel[FT232_USBD_AUX_CHANNEL],
         FTDI_USB_AUX_OUT_EP, ENDP4);
+}
+
+static void ft232_usbd_sof(void)
+{
+    Ft232UsbdState *const state = Ft232Usbd0.state;
+
+    for (uint8_t channel = 0U; channel < FTDI_USB_INTERFACE_COUNT; channel++)
+    {
+        if (state->channel[channel].latency_elapsed <
+            state->channel[channel].latency_timer)
+        {
+            state->channel[channel].latency_elapsed++;
+        }
+    }
 }
 
 static Ft232UsbdChannelState *ft232_usbd_request_channel(
@@ -891,6 +940,7 @@ static Ft232UsbdResult ft232_usbd_tx_write(
         (void)USB_SIL_Write(endpoint_address, (uint8_t *)data, length);
         __asm volatile ("" ::: "memory");
         channel->in_produced++;
+        channel->latency_elapsed = 0U;
         SetEPTxValid(endpoint);
     }
     Ft232Usbd_InterruptUnlock(self, irq_was_enabled);
@@ -932,6 +982,7 @@ static void ft232_usbd_out_receive(Ft232UsbdState *const state,
 
     (void)USB_SIL_Read(endpoint_address, channel->out_data);
     channel->out_length = (uint8_t)length;
+    channel->latency_elapsed = 0U;
     __asm volatile ("" ::: "memory");
     channel->out_produced++;
 }
@@ -950,6 +1001,7 @@ static void ft232_usbd_cancel_channel(Ft232UsbdChannelState *const channel)
     channel->out_produced = channel->out_consumed;
     channel->in_consumed = channel->in_produced;
     channel->out_length = 0U;
+    channel->latency_elapsed = 0U;
 }
 
 static void ft232_usbd_purge_device_in(Ft232UsbdChannelState *const channel,
@@ -957,6 +1009,7 @@ static void ft232_usbd_purge_device_in(Ft232UsbdChannelState *const channel,
 {
     SetEPTxStatus(endpoint, EP_TX_NAK);
     channel->in_consumed = channel->in_produced;
+    channel->latency_elapsed = 0U;
 }
 
 uint8_t Ft232Usbd_InterruptLock(const Ft232Usbd *const self)
@@ -1014,6 +1067,13 @@ static void ft232_usbd_interrupt_service(void)
     {
         _SetISTR((uint16_t)CLR_RESET);
         Device_Property.Reset();
+    }
+
+    wIstr = _GetISTR();
+    if ((wIstr & ISTR_SOF & wInterrupt_Mask) != 0U)
+    {
+        _SetISTR((uint16_t)CLR_SOF);
+        ft232_usbd_sof();
     }
 }
 

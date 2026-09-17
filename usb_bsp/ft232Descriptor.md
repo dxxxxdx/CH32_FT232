@@ -63,7 +63,8 @@ WCH EP0 会对 `wValue/wIndex` 整字执行 `ByteSwap`，因此所有非零字�
 `USBwValue0/1`、`USBwIndex0/1` 的逻辑字节校验；不能把内部整字直接与线上的 `0001`
 比较。FT2232C/D 通道 A/B 的 latency 请求使用逻辑 `wIndex=0001/0002`。
 
-latency 值会保存并可读回，但当前回复一产生就提交 IN，不依赖 SOF 定时。MPSSE 数据流里的
+latency 值会保存并可读回。SOF 提供 1 ms 时基：有效回复一产生就提交 IN，
+无回复且 latency 到期时提交只含 `31 60` 的状态包。MPSSE 数据流里的
 `86 lo hi` 由 Manager 完整消费并丢弃，外部设置的 TCK 分频不会改变当前 GPIO 固定档位。
 `SIO_SET_BAUDRATE` 不校验编码后的 `wIndex`：libftdi 会在其中混入除数高位和芯片代际信息，
 而当前两个数据面都不使用该除数。参数直接丢弃，并由 EP0 返回零长度 Status-IN ACK。
@@ -74,13 +75,13 @@ Manager 的 RX/TX 当前各为 2048 字节，正好容纳 32 个 64 字节 OUT �
 描述符中的 `wMaxPacketSize` 必须保持 64，它描述物理端点事务上限，与软件环形队列总深度无关。
 
 Bulk OUT 的最多 64 字节有效载荷原样提交给 Manager RX。Bulk IN 每包先放两个 FTDI 状态字节，
-所以每个 64 字节 IN 包最多从 Manager TX 取 62 字节。Manager 没有回复时 EP1 保持 NAK，
-不会主动提交只有 `31 60` 的空状态包。Gowin WINUSB 的 MPSSE 同步读取不会像 libftdi 一样
-持续过滤空状态包；若空包抢在 `FA AA` 前完成，软件会把剥头后的零长度数组当成同步结果。
-因此只有 Manager 已经产生有效载荷时才提交 IN：
+所以每个 64 字节 IN 包最多从 Manager TX 取 62 字节。Gowin WINUSB 的 MPSSE 同步读取不会像
+libftdi 一样持续过滤空状态包，因此空状态只在 OUT 邮箱已消费、Manager 未产生回复且
+latency 到期后提交。有效载荷优先，避免空状态抢在 `FA AA` 前完成：
 
 ```text
 31 60 [最多 62 字节 Manager 回复]
+31 60 [latency 到期的空闲状态]
 ```
 
 TX 满时先发 IN 包再继续运行 Manager。RX 空间不足时不要重新使能 OUT 接收，保持 NAK，

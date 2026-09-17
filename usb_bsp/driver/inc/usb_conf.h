@@ -13,7 +13,7 @@
 #define ENDP3_TXADDR        (0x0140U)
 #define ENDP4_RXADDR        (0x0180U)
 
-/* Bulk 采用传输完成事件推进，不开 SOF/ESOF；当前数据面不靠 1 ms 时基轮询。 */
-#define IMR_MSK (CNTR_CTRM | CNTR_RESETM)
+/* SOF 只用于 FTDI latency 的 1 ms 时基；Bulk 所有权仍由传输完成事件推进。 */
+#define IMR_MSK (CNTR_CTRM | CNTR_RESETM | CNTR_SOFM)
 
 #endif /* CH32_FT232_USB_CONF_H */

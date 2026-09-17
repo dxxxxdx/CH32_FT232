@@ -20,23 +20,23 @@ typedef struct
 
 /* 板级四线配置集中在这里；修改引脚时不需要进入翻转实现。 */
 static const JtagGpioPin jtag_gpio_tck JTAG_GPIO_CONFIG_FLASH = {
-    .port = GPIOB,
-    .mask = (uint16_t)GPIO_Pin_13
+    .port = GPIOA,
+    .mask = (uint16_t)GPIO_Pin_6
 };
 
 static const JtagGpioPin jtag_gpio_tdi JTAG_GPIO_CONFIG_FLASH = {
-    .port = GPIOB,
-    .mask = (uint16_t)GPIO_Pin_15
+    .port = GPIOA,
+    .mask = (uint16_t)GPIO_Pin_4
 };
 
 static const JtagGpioPin jtag_gpio_tdo JTAG_GPIO_CONFIG_FLASH = {
     .port = GPIOA,
-    .mask = (uint16_t)GPIO_Pin_8
+    .mask = (uint16_t)GPIO_Pin_2
 };
 
 static const JtagGpioPin jtag_gpio_tms JTAG_GPIO_CONFIG_FLASH = {
-    .port = GPIOB,
-    .mask = (uint16_t)GPIO_Pin_14
+    .port = GPIOA,
+    .mask = (uint16_t)GPIO_Pin_5
 };
 
 #endif /* GPIO_CFG_IMPLEMENTATION */

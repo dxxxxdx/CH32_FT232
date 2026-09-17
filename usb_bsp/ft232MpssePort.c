@@ -20,6 +20,7 @@ static void ft232_mpsse_rx_consume(const MpssePort *self);
 static MpssePortResult ft232_mpsse_tx_write(const MpssePort *self,
                                             const uint8_t *data,
                                             uint16_t length);
+static uint8_t ft232_mpsse_tx_status(const MpssePort *self);
 static uint8_t ft232_mpsse_interrupt_lock(const MpssePort *self);
 static void ft232_mpsse_interrupt_unlock(const MpssePort *self, uint8_t token);
 
@@ -30,6 +31,7 @@ static const MpssePortOps ft232_mpsse_ops FT232_MPSSE_PORT_FLASH = {
     .rx_peek = ft232_mpsse_rx_peek,
     .rx_consume = ft232_mpsse_rx_consume,
     .tx_write = ft232_mpsse_tx_write,
+    .tx_status = ft232_mpsse_tx_status,
     .interrupt_lock = ft232_mpsse_interrupt_lock,
     .interrupt_unlock = ft232_mpsse_interrupt_unlock
 };
@@ -114,6 +116,11 @@ static MpssePortResult ft232_mpsse_tx_write(const MpssePort *const self,
     default:
         __builtin_trap();
     }
+}
+
+static uint8_t ft232_mpsse_tx_status(const MpssePort *const self)
+{
+    return Ft232Usbd_MpsseTxStatus(ft232_mpsse_usbd(self));
 }
 
 static uint8_t ft232_mpsse_interrupt_lock(const MpssePort *const self)

@@ -131,9 +131,8 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
         progressed = 1U;
     }
 
-    /* OUT 和 Manager 都推进后再次检查回复。不能主动挂只有 31 60 的空状态包：
-     * Gowin WINUSB 的 MPSSE 同步只读一次，若先取走空包就会把有效回复留在
-     * 下一包，并在 synchronize_mpsse 中把零长度数组当成同步结果。
+    /* OUT 和 Manager 都推进后再次检查回复。有效载荷优先于 latency
+     * 空闲状态，避免 Gowin WINUSB 的单次同步读先取走纯 31 60。
      */
     pump_result = ftdi_jtag_pump_port_tx(self);
     if (pump_result == FTDI_JTAG_PUMP_PROGRESS)
@@ -156,6 +155,11 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
     else if (pump_result == FTDI_JTAG_PUMP_WAIT)
     {
         waiting = 1U;
+    }
+    if ((manager_result != JTAG_SERVICE_BUDGET_REACHED) &&
+        (self->config->port->ops->tx_status(self->config->port) != 0U))
+    {
+        progressed = 1U;
     }
 
     if (progressed != 0U)

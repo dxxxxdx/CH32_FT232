@@ -43,6 +43,8 @@ typedef struct
     MpssePortResult (*tx_write)(const MpssePort *self,
                                 const uint8_t *data,
                                 uint16_t length);
+    /* 有效载荷泵完成后调用；实现可按 latency 提交空闲状态包。 */
+    uint8_t (*tx_status)(const MpssePort *self);
     uint8_t (*interrupt_lock)(const MpssePort *self);
     void (*interrupt_unlock)(const MpssePort *self, uint8_t token);
 } MpssePortOps;

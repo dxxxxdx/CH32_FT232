@@ -4,7 +4,7 @@
 
 - `usb_bsp/`：CH32 USB 外设、枚举、FT2232 控制请求和端点邮箱。
 - `jtag_core/`：MPSSE 解析、Gowin 特例、JTAG 状态以及两个 RB 的 ops 接口。
-- `gpio_toggle/`：PB13/PB15/PB14/PA8 的寄存器配置与实际翻转。
+- `gpio_toggle/`：PA6/PA4/PA5/PA2 的寄存器配置与实际翻转。
 
 ## 原始 MPSSE 边界
 
@@ -17,11 +17,13 @@ void Ft232Usbd_MpsseRxConsume(const Ft232Usbd *self);
 Ft232UsbdResult Ft232Usbd_MpsseTxWrite(const Ft232Usbd *self,
                                        const uint8_t *data,
                                        uint16_t length);
+uint8_t Ft232Usbd_MpsseTxStatus(const Ft232Usbd *self);
 ```
 
 OUT 的 1..64 字节有效载荷原样交给 MPSSE 核。TX 接口接收 1..62 字节裸回复，
 USB/BSP 层在自己的 64 字节静态缓冲中补 `31 60`，再复制进 PMA。
-空闲时不提交只有 `31 60` 的状态包。
+有效回复泵完成后，USB/BSP 层可在 latency 到期时提交只有 `31 60`
+的状态包，使 libftdi 的空读可以正常结束。
 
 `MpssePortOps` 是第一层发布的边界。JTAG 层只认识裸字节、事件和背压结果，
 不包含 `ft232Usbd.h`；USB/BSP 层也不包含任何 JTAG 头文件。
@@ -46,10 +48,10 @@ Manager 通过 `JtagRingBufferOps` 的 `clear/used/free/front/take/put/write/pee
 根目录 `GPIO_Cfg.h` 集中放置四个独立的静态引脚对象，
 `gpio_toggle/GPIO_Cfg.c` 只保留初始化和寄存器翻转实现：
 
-- TCK：PB13，输出
-- TDI：PB15，输出
-- TMS：PB14，输出
-- TDO：PA8，输入
+- TCK：PA6，输出
+- TDI：PA4，输出
+- TMS：PA5，输出
+- TDO：PA2，输入
 
 JTAG 核只调用 `JtagIoOps` 的命令级操作。逐边沿仍直接读写 CH32 的
 `OUTDR/INDR`；普通 LSB/MSB/TMS 移位、Gowin DR32 合并和 150000 周期擦除

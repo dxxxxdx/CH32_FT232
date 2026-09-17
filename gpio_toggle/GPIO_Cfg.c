@@ -6,13 +6,13 @@
 #define JTAG_GPIO_FLASH __attribute__((section(".rodata.jtag_gpio")))
 #define JTAG_GOWIN_ERASE_CLOCKS (150000UL)
 
-/* CFGHR 每个引脚占四位。0x3=50 MHz 通用推挽输出，0x4=浮空输入。
- * PB13~PB15 对应 bit20~31；PA8 对应 bit0~3。
+/* CFGLR 每个引脚占四位。0x3=50 MHz 通用推挽输出，0x4=浮空输入。
+ * PA4~PA6 对应 bit16~27；PA2 对应 bit8~11。
  */
-#define JTAG_GPIOB_CFG_MASK   (0xFFF00000UL)
-#define JTAG_GPIOB_OUTPUT_CFG (0x33300000UL)
-#define JTAG_GPIOA_CFG_MASK   (0x0000000FUL)
-#define JTAG_GPIOA_INPUT_CFG  (0x00000004UL)
+#define JTAG_OUTPUT_CFG_MASK  (0x0FFF0000UL)
+#define JTAG_OUTPUT_CFG_VALUE (0x03330000UL)
+#define JTAG_INPUT_CFG_MASK   (0x00000F00UL)
+#define JTAG_INPUT_CFG_VALUE  (0x00000400UL)
 
 typedef struct
 {
@@ -73,14 +73,14 @@ void GPIO_Cfg_Init(const JtagIo *const self)
                                  (uint32_t)pins->tdi->mask;
 
     /* 先写低输出锁存，再切推挽输出，避免配置瞬间在 TCK/TMS 上产生伪上升沿。 */
-    RCC->APB2PCENR |= (RCC_IOPAEN | RCC_IOPBEN);
+    RCC->APB2PCENR |= RCC_IOPAEN;
     pins->tck->port->BCR = output_mask;
-    pins->tck->port->CFGHR =
-        (pins->tck->port->CFGHR & ~JTAG_GPIOB_CFG_MASK) |
-        JTAG_GPIOB_OUTPUT_CFG;
-    pins->tdo->port->CFGHR =
-        (pins->tdo->port->CFGHR & ~JTAG_GPIOA_CFG_MASK) |
-        JTAG_GPIOA_INPUT_CFG;
+    pins->tck->port->CFGLR =
+        (pins->tck->port->CFGLR & ~JTAG_OUTPUT_CFG_MASK) |
+        JTAG_OUTPUT_CFG_VALUE;
+    pins->tdo->port->CFGLR =
+        (pins->tdo->port->CFGLR & ~JTAG_INPUT_CFG_MASK) |
+        JTAG_INPUT_CFG_VALUE;
 }
 
 static inline void jtag_gpio_pin_write(const JtagGpioPin *const pin,

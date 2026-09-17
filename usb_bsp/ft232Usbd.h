@@ -30,8 +30,9 @@ typedef struct
     volatile uint8_t out_consumed;
     volatile uint8_t in_produced;
     volatile uint8_t in_consumed;
-    uint8_t latency_timer;
-    uint8_t bit_mode;
+    volatile uint8_t latency_timer;
+    volatile uint8_t latency_elapsed;
+    volatile uint8_t bit_mode;
 } Ft232UsbdChannelState;
 
 typedef struct
@@ -92,13 +93,14 @@ void Ft232Usbd_GetEvents(const Ft232Usbd *self, Ft232UsbdEvents *events);
 
 /* 通道 A OUT 数据就是裸 MPSSE，Peek 后必须整包 Consume；未消费时 EP2 保持 NAK。
  * MpsseTxWrite 接受 1..62 字节裸回复，在本层补 31 60 后复制进 USB PMA。
- * 返回 OK 后调用方即可释放源数据；空回复不会生成只有状态头的 IN 包。
+ * MpsseTxStatus 只在 latency 到期且 IN 空闲时提交纯 31 60；有效回复始终优先。
  */
 uint16_t Ft232Usbd_MpsseRxPeek(const Ft232Usbd *self, const uint8_t **data);
 void Ft232Usbd_MpsseRxConsume(const Ft232Usbd *self);
 Ft232UsbdResult Ft232Usbd_MpsseTxWrite(const Ft232Usbd *self,
                                        const uint8_t *data,
                                        uint16_t length);
+uint8_t Ft232Usbd_MpsseTxStatus(const Ft232Usbd *self);
 
 /* 通道 B 只提供独立的原始 FTDI 数据面；UART 引脚和收发器尚未由板级配置指定，
  * 因而本模块不擅自消费数据，也不伪造 UART 状态。
