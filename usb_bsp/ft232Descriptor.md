@@ -89,5 +89,7 @@ TX 满时先发 IN 包再继续运行 Manager。RX 空间不足时不要重新�
 USB/BSP 层另有一个 64 字节 MPSSE IN 拼包缓冲，均不在函数栈上。邮箱未消费时相应 OUT 端点保持 NAK；PMA 已接管 IN 数据后
 Manager TX 才允许出队。
 
-静态序列号是 `CH32_FTDI_000000000000`。若需要多设备区分，USB 驱动可在 EP0 临时缓冲区中
-按芯片 ID 生成 string index 3 的回复；不要改写 Flash 中的常量数组。
+序列号格式是 `CH32_FTDI_YYMMDDhhmmss`。每次执行 CMake 构建时都以 UTC
+时间生成新的 12 字符后缀，不读写 CMake cache。生成头文件作为
+`ft232Descriptor.c` 的显式依赖，序列号改变后会重编描述符并重新链接。
+最终数组仍是 UTF-16LE 编译期常量，全部存放在 Flash。
