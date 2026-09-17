@@ -1,4 +1,5 @@
 #include "ft232Descriptor.h"
+#include "ftdiUsbBuildSerial.h"
 
 #define USB_U16_LOW(value)  ((uint8_t)((uint16_t)(value) & 0xFFU))
 #define USB_U16_HIGH(value) ((uint8_t)(((uint16_t)(value) >> 8U) & 0xFFU))
@@ -149,9 +150,7 @@ const uint8_t FtdiUsbSerialDescriptor[FTDI_USB_SERIAL_DESC_SIZE]
     FTDI_USB_SERIAL_DESC_SIZE, FTDI_USB_DESC_STRING,
     'C', 0x00U, 'H', 0x00U, '3', 0x00U, '2', 0x00U, '_', 0x00U,
     'F', 0x00U, 'T', 0x00U, 'D', 0x00U, 'I', 0x00U, '_', 0x00U,
-    '0', 0x00U, '0', 0x00U, '0', 0x00U, '0', 0x00U, '0', 0x00U,
-    '0', 0x00U, '0', 0x00U, '0', 0x00U, '0', 0x00U, '0', 0x00U,
-    '0', 0x00U, '0', 0x00U
+    FTDI_USB_BUILD_SERIAL_SUFFIX_UTF16
 };
 
 /* Microsoft OS 2.0 平台能力：Windows 将接口 0 自动绑定到 WinUSB。 */
@@ -189,6 +188,9 @@ _Static_assert(FTDI_USB_BULK_PACKET_SIZE == 64U,
                "CH32 USB Full Speed bulk endpoint must use 64-byte packets");
 _Static_assert(FTDI_USB_IN_DATA_SIZE == 62U,
                "FTDI IN packet reserves two status bytes");
+_Static_assert(FTDI_USB_SERIAL_DESC_SIZE ==
+                   (2U + (2U * (10U + FTDI_USB_BUILD_SERIAL_SUFFIX_LENGTH))),
+               "FTDI serial descriptor size must match its generated suffix");
 #if UART_FORWARD_ENABLED != 0U
 _Static_assert(FTDI_USB_CDC_DATA_PACKET_SIZE == 16U,
                "CDC PMA allocation is sized for 16-byte bulk packets");

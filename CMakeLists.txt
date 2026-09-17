@@ -53,6 +53,8 @@ set(CMAKE_CXX_EXTENSIONS ON)
 # =========================================================================
 set(TARGET_NAME CH32_FT232)
 set(LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/Ld/Link.ld")
+set(GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(FTDI_USB_SERIAL_HEADER "${GENERATED_INCLUDE_DIR}/ftdiUsbBuildSerial.h")
 
 # 当前这批固件统一给 20PINOUT 板使用。FORCE 会覆盖 IDE 旧构建目录中
 # 残留的 DEFAULT 缓存，恢复多板构建时再去掉 FORCE。
@@ -199,6 +201,20 @@ add_executable(${TARGET_NAME}
         boardtype/20pinout.h
 )
 
+# 该 target 没有 OUTPUT，因此每次构建都会重新生成秒级 UTC 序列号。
+# descriptor object 显式依赖生成头，内容变化后必须重编并重新链接。
+add_custom_target(ftdi_usb_serial_header ALL
+        COMMAND "${CMAKE_COMMAND}"
+        "-DOUTPUT_FILE=${FTDI_USB_SERIAL_HEADER}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generateFtdiUsbSerial.cmake"
+        BYPRODUCTS "${FTDI_USB_SERIAL_HEADER}"
+        COMMENT "Generating build-time FTDI USB serial number..."
+        VERBATIM
+)
+add_dependencies(${TARGET_NAME} ftdi_usb_serial_header)
+set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/usb_bsp/ft232Descriptor.c"
+        APPEND PROPERTY OBJECT_DEPENDS "${FTDI_USB_SERIAL_HEADER}")
+
 set_target_properties(${TARGET_NAME} PROPERTIES
         OUTPUT_NAME "${TARGET_NAME}"
         SUFFIX ".elf"
@@ -208,6 +224,7 @@ set_target_properties(${TARGET_NAME} PROPERTIES
 # 6. Include directories
 # =========================================================================
 target_include_directories(${TARGET_NAME} PRIVATE
+        "${GENERATED_INCLUDE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/Startup"
         "${CMAKE_CURRENT_SOURCE_DIR}/Peripheral/inc"

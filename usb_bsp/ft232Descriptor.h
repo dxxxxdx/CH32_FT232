@@ -110,8 +110,8 @@ extern "C" {
 #define FTDI_SIO_BITMODE_RESET             (0x00U)
 #define FTDI_SIO_BITMODE_MPSSE             (0x02U)
 
-/* 所有数组均显式进入 Flash。若 USB 驱动需要唯一序列号，应在 EP0 临时缓冲区
- * 生成 string index 3 的替代回复，不要修改这些只读描述符。
+/* 所有数组均显式进入 Flash。序列号的 12 字符后缀由 CMake 构建阶段生成，
+ * 仍然是编译期常量，不占用 EP0 临时缓冲或运行时 RAM。
  */
 #define FTDI_USB_DESCRIPTOR_FLASH __attribute__((section(".rodata.usb_descriptor")))
 
