@@ -25,5 +25,5 @@ int main(void)
         LedInstances_Service();
     }
 
-    return 0;
+
 }
