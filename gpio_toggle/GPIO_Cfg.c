@@ -2,18 +2,16 @@
 #include "GPIO_Cfg.h"
 
 #include "ch32v20x.h"
+#include "SystemTimebase.h"
+#include <JtagGpioInterrupt.h>
 
 #define JTAG_GPIO_FLASH __attribute__((section(".rodata.jtag_gpio")))
-/* 当前 GPIO 实测 TCK 约 2 MHz。Gowin 内置 Flash 擦除要求约 160 ms
- * 连续时钟；额外留 20 ms 裕量，不能继续照搬 BL702 的 150000 脉冲。
+/* UG290 的 GW1NZ-1 擦除要求连续 Run-Test/Idle 120 ms。
+ * 留出余量取 180 ms，按 HCLK 时基计时，不能用假定 TCK 换算固定拍数。
  */
-#define JTAG_FIXED_TCK_HZ             (2000000UL)
-#define JTAG_GOWIN_ERASE_TIME_US      (180000UL)
-#define JTAG_GOWIN_ERASE_CLOCKS       \
-    ((JTAG_FIXED_TCK_HZ / 1000000UL) * JTAG_GOWIN_ERASE_TIME_US)
-
-_Static_assert((JTAG_FIXED_TCK_HZ % 1000000UL) == 0UL,
-               "fixed TCK must convert to clocks/us at compile time");
+#define JTAG_GOWIN_ERASE_TIME_MS      (180U)
+/* UG290 7.2 的 T-process 擦除步骤 4：ConfigEnable 前连续 Idle 至少 500 us。 */
+#define JTAG_GOWIN_PREPARE_TIME_US    (600U)
 
 /* CH32V20x 每个 GPIO 配置占四位；模式值来自 GPIOx_CFGLR/CFGHR。 */
 #define GPIO_CFG_MODE_OUTPUT_PP_50MHZ (0x03UL)
@@ -69,6 +67,8 @@ static void jtag_gpio_clock_program_dr32(const JtagIo *self,
                                          const uint8_t word[4],
                                          uint8_t tail);
 static void jtag_gpio_clock_erase(const JtagIo *self);
+static void jtag_gpio_clock_prepare(const JtagIo *self);
+static void jtag_gpio_clock_idle(const JtagIo *self, uint32_t ticks);
 static inline __attribute__((always_inline)) void jtag_gpio_edge_delay(void);
 static inline void gpio_cfg_pin_write(const GpioCfgPin *pin, uint8_t value);
 static inline void gpio_cfg_pin_set(const GpioCfgPin *pin);
@@ -100,7 +100,8 @@ static const JtagIoOps jtag_gpio_ops JTAG_GPIO_FLASH = {
     .shift_tms = jtag_gpio_shift_tms,
     .shift_msb_output = jtag_gpio_shift_msb_output,
     .clock_program_dr32 = jtag_gpio_clock_program_dr32,
-    .clock_erase = jtag_gpio_clock_erase
+    .clock_erase = jtag_gpio_clock_erase,
+    .clock_prepare = jtag_gpio_clock_prepare
 };
 
 const GpioCfg GpioCfg0 GPIO_CFG_FLASH = {
@@ -365,20 +366,44 @@ static void jtag_gpio_clock_program_dr32(const JtagIo *const self,
 
 static void jtag_gpio_clock_erase(const JtagIo *const self)
 {
-    const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
+    const uint32_t ticks = (SystemCoreClock / 1000U) * JTAG_GOWIN_ERASE_TIME_MS;
 
-    /* 擦除窗口只由 Gowin Flash 控制流调用一次；普通 GPIO 连续输出，
-     * 不依赖 PWM 引脚复用，也不受主机声明的虚假 MPSSE 档位影响。
+    jtag_gpio_clock_idle(self, ticks);
+}
+
+static void jtag_gpio_clock_prepare(const JtagIo *const self)
+{
+    const uint32_t ticks =
+        (SystemCoreClock / 1000000U) * JTAG_GOWIN_PREPARE_TIME_US;
+    const uint32_t interrupt_token = JtagGpioInterrupt_Save();
+
+    /* 仅 600 us 窗口屏蔽可屏蔽中断，避免 UART ISR 插入空档；退出恢复
+     * 进入时的使能位，不把外层原本关闭的中断盲目打开。DMA 仍可运行。
+     */
+    jtag_gpio_clock_idle(self, ticks);
+    JtagGpioInterrupt_Restore(interrupt_token);
+}
+
+static void jtag_gpio_clock_idle(const JtagIo *const self, uint32_t ticks)
+{
+    const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
+    uint32_t started_at;
+
+    /* 两种窗口共用 HCLK 计时和 GPIO 边沿；这里不碰时基寄存器或中断状态，
+     * 180 ms 擦除的中断语义保持原样，不受主机声明的 MPSSE 档位影响。
      */
     gpio_cfg_pin_reset(pins->tms);
     gpio_cfg_pin_reset(pins->tdi);
-    for (uint32_t clock = 0U; clock < JTAG_GOWIN_ERASE_CLOCKS; clock++)
+    gpio_cfg_pin_reset(pins->tck);
+    started_at = SystemTimebase_Now(&SystemTimebase0);
+    do
     {
         gpio_cfg_pin_reset(pins->tck);
         jtag_gpio_edge_delay();
         gpio_cfg_pin_set(pins->tck);
         jtag_gpio_edge_delay();
     }
+    while ((uint32_t)(SystemTimebase_Now(&SystemTimebase0) - started_at) < ticks);
     gpio_cfg_pin_reset(pins->tck);
 }
 

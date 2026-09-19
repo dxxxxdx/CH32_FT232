@@ -1,6 +1,7 @@
 #include "ftdiJtagService.h"
 
-#define FTDI_JTAG_CLOCK_BUDGET (1024U)
+#define FTDI_JTAG_CLOCK_BUDGET (JTAG_MANAGER_RX_BUFFER_SIZE * 8U)
+#define FTDI_JTAG_RX_GAP_MS (2U)
 
 typedef enum
 {
@@ -13,6 +14,7 @@ static FtdiJtagServiceResult ftdi_jtag_handle_events(const FtdiJtagService *self
 static FtdiJtagPumpResult ftdi_jtag_pump_port_rx(const FtdiJtagService *self);
 static FtdiJtagPumpResult ftdi_jtag_pump_port_tx(const FtdiJtagService *self);
 static FtdiJtagServiceResult ftdi_jtag_map_manager_result(JtagServiceResult result);
+static uint8_t ftdi_jtag_batch_ready(const FtdiJtagService *self);
 
 FTDI_JTAG_SERVICE_DEFINE(ftdi_jtag_service, MpssePort0,
                          JTAGManager0, FTDI_JTAG_CLOCK_BUDGET);
@@ -67,6 +69,8 @@ void FtdiJtagService_Init(const FtdiJtagService *const self)
     self->state->seen_host_tx_purge = events.host_tx_purge;
     self->state->last_result = FTDI_JTAG_SERVICE_IDLE;
     self->state->sticky_fault = FTDI_JTAG_SERVICE_IDLE;
+    self->state->rx_last_packet_at = 0U;
+    self->state->rx_batch_ready = 0U;
     self->config->port->ops->enable(self->config->port);
 }
 
@@ -109,30 +113,37 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
         waiting = 1U;
     }
 
-    /* OUT 搬运期间到达的 reset/purge 必须先使刚入队的旧命令失效。
-     * 从复查事件到本轮 GPIO 完成始终锁住数据 port，防止下一个
-     * USB OUT 中断插入 Gowin 的 IR、DR32 或擦除时钟。
-     */
-    irq_token = self->config->port->ops->interrupt_lock(self->config->port);
-    result = ftdi_jtag_handle_events(self);
-    if (result != FTDI_JTAG_SERVICE_IDLE)
+    if (ftdi_jtag_batch_ready(self) != 0U)
     {
-        self->config->port->ops->interrupt_unlock(self->config->port,
-                                                   irq_token);
-        return result;
-    }
+        /* 先收批次再连续执行，执行期间不搬入下一批。保存全局IRQ状态，
+         * 防止USB和UART中断插入页内；只有TX背压允许提前让出以发送回复。
+         * 锁内重新检查reset/purge，不能执行收包时已经取消的字节。
+         */
+        irq_token = self->config->port->ops->interrupt_lock(self->config->port);
+        result = ftdi_jtag_handle_events(self);
+        if (result != FTDI_JTAG_SERVICE_IDLE)
+        {
+            self->config->port->ops->interrupt_unlock(self->config->port,
+                                                       irq_token);
+            return result;
+        }
 
-    manager_result = JTAGManager_Service(self->config->jtag,
-                                         self->config->clock_budget);
-    self->config->port->ops->interrupt_unlock(self->config->port, irq_token);
-    result = ftdi_jtag_map_manager_result(manager_result);
-    if (result == FTDI_JTAG_SERVICE_MPSSE_FAULT)
-    {
-        return result;
-    }
-    if (result == FTDI_JTAG_SERVICE_PROGRESS)
-    {
-        progressed = 1U;
+        manager_result = JTAGManager_Service(self->config->jtag,
+                                             self->config->clock_budget);
+        self->config->port->ops->interrupt_unlock(self->config->port, irq_token);
+        if (JTAGManager_RxUsed(self->config->jtag) == 0U)
+        {
+            self->state->rx_batch_ready = 0U;
+        }
+        result = ftdi_jtag_map_manager_result(manager_result);
+        if (result == FTDI_JTAG_SERVICE_MPSSE_FAULT)
+        {
+            return result;
+        }
+        if (result == FTDI_JTAG_SERVICE_PROGRESS)
+        {
+            progressed = 1U;
+        }
     }
 
     /* OUT 和 Manager 都推进后再次检查真实回复。只有 31 60 的兼容状态包
@@ -193,6 +204,7 @@ static FtdiJtagServiceResult ftdi_jtag_handle_events(const FtdiJtagService *cons
         (events.sio_reset != self->state->seen_sio_reset))
     {
         JTAGManager_Reset(self->config->jtag);
+        self->state->rx_batch_ready = 0U;
         self->config->port->ops->rx_consume(self->config->port);
         self->state->seen_bus_reset = events.bus_reset;
         self->state->seen_sio_reset = events.sio_reset;
@@ -211,6 +223,7 @@ static FtdiJtagServiceResult ftdi_jtag_handle_events(const FtdiJtagService *cons
     {
         /* 主机 TX 对应设备 RX，连同半条 MPSSE 命令一起清除。 */
         JTAGManager_RxPurge(self->config->jtag);
+        self->state->rx_batch_ready = 0U;
         self->config->port->ops->rx_consume(self->config->port);
         self->state->seen_host_tx_purge = events.host_tx_purge;
     }
@@ -220,10 +233,14 @@ static FtdiJtagServiceResult ftdi_jtag_handle_events(const FtdiJtagService *cons
 static FtdiJtagPumpResult ftdi_jtag_pump_port_rx(const FtdiJtagService *const self)
 {
     const uint8_t *data;
-    const uint16_t length =
-        self->config->port->ops->rx_peek(self->config->port, &data);
+    uint16_t length;
     JtagRxPacketResult rx_result;
 
+    if (self->state->rx_batch_ready != 0U)
+    {
+        return FTDI_JTAG_PUMP_IDLE;
+    }
+    length = self->config->port->ops->rx_peek(self->config->port, &data);
     if (length == 0U)
     {
         return FTDI_JTAG_PUMP_IDLE;
@@ -236,11 +253,34 @@ static FtdiJtagPumpResult ftdi_jtag_pump_port_rx(const FtdiJtagService *const se
     }
     if (rx_result == JTAG_RX_PACKET_ACCEPTED)
     {
+        self->state->rx_last_packet_at =
+            self->config->port->ops->time_now(self->config->port);
+        if ((length < MPSSE_PORT_RX_PACKET_SIZE) ||
+            (JTAGManager_RxFree(self->config->jtag) < MPSSE_PORT_RX_PACKET_SIZE))
+        {
+            self->state->rx_batch_ready = 1U;
+        }
         self->config->port->ops->rx_consume(self->config->port);
         return FTDI_JTAG_PUMP_PROGRESS;
     }
     /* EP2 已保证 1..64 字节且邮箱数据有效，命中表示内部边界契约损坏。 */
     __builtin_trap();
+}
+
+static uint8_t ftdi_jtag_batch_ready(const FtdiJtagService *const self)
+{
+    if (JTAGManager_RxUsed(self->config->jtag) == 0U)
+    {
+        return 0U;
+    }
+    if ((self->state->rx_batch_ready == 0U) &&
+        (self->config->port->ops->time_elapsed(self->config->port,
+            self->state->rx_last_packet_at, FTDI_JTAG_RX_GAP_MS) != 0U))
+    {
+        /* 主机可能在64B整数倍处等待读回复，不保证发送短包或ZLP。 */
+        self->state->rx_batch_ready = 1U;
+    }
+    return self->state->rx_batch_ready;
 }
 
 static FtdiJtagPumpResult ftdi_jtag_pump_port_tx(const FtdiJtagService *const self)

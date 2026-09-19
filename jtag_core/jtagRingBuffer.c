@@ -1,10 +1,6 @@
 #include "jtagRingBuffer.h"
 
-#define JTAG_RING_BUFFER_MASK (JTAG_RING_BUFFER_SIZE - 1U)
-
-_Static_assert((JTAG_RING_BUFFER_SIZE & JTAG_RING_BUFFER_MASK) == 0U,
-               "JTAG ring buffer size must be a power of two");
-_Static_assert(sizeof(JtagRingBufferState) <= 2056U,
+_Static_assert(sizeof(JtagRingBufferState) <= 6U,
                "JTAG ring buffer exceeds its static RAM budget");
 
 static void jtag_ring_clear(const JtagRingBuffer *self);
@@ -47,29 +43,29 @@ static uint16_t jtag_ring_used(const JtagRingBuffer *const self)
 
 static uint16_t jtag_ring_free(const JtagRingBuffer *const self)
 {
-    return (uint16_t)(JTAG_RING_BUFFER_SIZE - self->state->used);
+    return (uint16_t)(self->mask + 1U - self->state->used);
 }
 
 static uint8_t jtag_ring_front(const JtagRingBuffer *const self)
 {
-    return self->state->data[self->state->read_pos];
+    return self->data[self->state->read_pos];
 }
 
 static uint8_t jtag_ring_take(const JtagRingBuffer *const self)
 {
-    const uint8_t value = self->state->data[self->state->read_pos];
+    const uint8_t value = self->data[self->state->read_pos];
 
     self->state->read_pos =
-        (uint16_t)((self->state->read_pos + 1U) & JTAG_RING_BUFFER_MASK);
+        (uint16_t)((self->state->read_pos + 1U) & self->mask);
     self->state->used--;
     return value;
 }
 
 static void jtag_ring_put(const JtagRingBuffer *const self, uint8_t value)
 {
-    self->state->data[self->state->write_pos] = value;
+    self->data[self->state->write_pos] = value;
     self->state->write_pos =
-        (uint16_t)((self->state->write_pos + 1U) & JTAG_RING_BUFFER_MASK);
+        (uint16_t)((self->state->write_pos + 1U) & self->mask);
     self->state->used++;
 }
 
@@ -94,12 +90,12 @@ static uint16_t jtag_ring_peek(const JtagRingBuffer *const self,
         return 0U;
     }
 
-    contiguous = (uint16_t)(JTAG_RING_BUFFER_SIZE - self->state->read_pos);
+    contiguous = (uint16_t)(self->mask + 1U - self->state->read_pos);
     if (contiguous > self->state->used)
     {
         contiguous = self->state->used;
     }
-    *data = &self->state->data[self->state->read_pos];
+    *data = &self->data[self->state->read_pos];
     return contiguous;
 }
 
@@ -107,6 +103,6 @@ static void jtag_ring_consume(const JtagRingBuffer *const self, uint16_t length)
 {
     /* length 来自最近一次 Peek，由上层维持不越界的内部契约。 */
     self->state->read_pos =
-        (uint16_t)((self->state->read_pos + length) & JTAG_RING_BUFFER_MASK);
+        (uint16_t)((self->state->read_pos + length) & self->mask);
     self->state->used = (uint16_t)(self->state->used - length);
 }

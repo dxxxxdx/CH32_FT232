@@ -185,6 +185,8 @@ foreach(_source_list PROJECT_C_SOURCES PROJECT_CXX_SOURCES PROJECT_ASM_SOURCES)
     list(FILTER ${_source_list} EXCLUDE REGEX ".*/cmake-build[^/]*/.*")
     list(FILTER ${_source_list} EXCLUDE REGEX ".*/build[^/]*/.*")
     list(FILTER ${_source_list} EXCLUDE REGEX ".*/CMakeFiles/.*")
+    # 主机回归包含模拟寄存器和独立 main，不能混入 MCU 固件。
+    list(FILTER ${_source_list} EXCLUDE REGEX ".*/tests/.*")
 endforeach()
 
 if(NOT UART_FORWARD_BUILD_ENABLED)
@@ -242,6 +244,7 @@ file(GLOB_RECURSE PROJECT_HEADERS CONFIGURE_DEPENDS
 list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/cmake-build[^/]*/.*")
 list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/build[^/]*/.*")
 list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/CMakeFiles/.*")
+list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/tests/.*")
 
 set(PROJECT_HEADER_DIRS "")
 foreach(_header ${PROJECT_HEADERS})
@@ -295,6 +298,8 @@ endif()
 # =========================================================================
 # 9. Post-build outputs: HEX / LST / ASM / ELF copy
 # =========================================================================
+# 默认保留IDE工作流；诊断构建显式关闭，不能覆盖用户当前保留的根目录ELF。
+option(COPY_ELF_TO_SOURCE "Copy built ELF back to the source directory" ON)
 add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
         COMMAND "${CMAKE_OBJCOPY}"
         -O ihex
@@ -307,14 +312,19 @@ add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
         COMMAND /bin/sh -c
         "\"${CMAKE_OBJDUMP}\" -S -d -M xw \"$<TARGET_FILE:${TARGET_NAME}>\" > \"${TARGET_NAME}.asm\""
 
-        COMMAND "${CMAKE_COMMAND}"
-        -E copy
-        "$<TARGET_FILE:${TARGET_NAME}>"
-        "${CMAKE_CURRENT_SOURCE_DIR}/${TARGET_NAME}.elf"
-
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
         COMMENT "Generating HEX/LST/ASM files and displaying memory usage..."
 )
+
+if(COPY_ELF_TO_SOURCE)
+    add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy
+            "$<TARGET_FILE:${TARGET_NAME}>"
+            "${CMAKE_CURRENT_SOURCE_DIR}/${TARGET_NAME}.elf"
+            COMMENT "Copying ELF to source directory..."
+            VERBATIM
+    )
+endif()
 
 set(EANALY_EXE "/bin/eanaly")
 if(EXISTS "${EANALY_EXE}")

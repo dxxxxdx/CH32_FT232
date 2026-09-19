@@ -15,6 +15,7 @@ typedef struct
                                const uint8_t word[4],
                                uint8_t tail);
     void (*clock_erase)(const JtagIo *self);
+    void (*clock_prepare)(const JtagIo *self);
 } JtagIoOps;
 
 struct JtagIo

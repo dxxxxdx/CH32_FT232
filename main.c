@@ -4,6 +4,7 @@
 #include "ftdiJtagService.h"
 #include "LedInstances.h"
 #include "uartForwardService.h"
+#include "SystemTimebase.h"
 
 int main(void)
 {
@@ -16,6 +17,8 @@ int main(void)
     Ft232Usbd_Init(&Ft232Usbd0);
     FtdiJtagService0_Init();
     UartForwardService0_Init();
+    /* 启动延时结束后统一启动时基，USB批处理不能依赖运行灯是否启用。 */
+    SystemTimebase_Init(&SystemTimebase0);
     Ft232Usbd_InterruptInit(&Ft232Usbd0);
 
     while (1)

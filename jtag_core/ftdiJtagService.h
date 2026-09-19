@@ -15,15 +15,18 @@ typedef struct
 
 typedef struct
 {
+    uint32_t rx_last_packet_at;
     uint8_t seen_bus_reset;
     uint8_t seen_sio_reset;
     uint8_t seen_host_rx_purge;
     uint8_t seen_host_tx_purge;
     volatile uint8_t last_result;
     volatile uint8_t sticky_fault;
+    /* 批次调度只归service所有；长度/内容/解析状态仍只存于manager。 */
+    uint8_t rx_batch_ready;
 } FtdiJtagServiceState;
 
-_Static_assert(sizeof(FtdiJtagServiceState) <= 6U,
+_Static_assert(sizeof(FtdiJtagServiceState) <= 12U,
                "FTDI JTAG bridge state exceeds its static RAM budget");
 
 typedef struct

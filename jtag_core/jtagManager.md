@@ -33,13 +33,19 @@ RX/TX 各自是一个静态 `JtagRingBuffer`：
 
 ```text
 JTAGManager
-  ├─ rx -> JtagRingBuffer -> ops + state[2048]
-  └─ tx -> JtagRingBuffer -> ops + state[2048]
+  ├─ rx -> JtagRingBuffer -> ops + indices + data[4096]
+  └─ tx -> JtagRingBuffer -> ops + indices + data[512]
 ```
 
 数组、读写索引和 `used` 只由 `jtagRingBuffer.c` 修改。
 Manager 通过 `JtagRingBufferOps` 的 `clear/used/free/front/take/put/write/peek/consume`
 访问队列，不再持有 RB 实体，也不跨层访问索引。
+
+批次调度由 `FtdiJtagService` 唯一维护，队列占用由 manager 的只读接口提供。
+短包、队列不足一包或末包后空闲 2 ms 结束收集；64 字节整数倍的传输不依赖
+主机补发 ZLP。普通执行预算覆盖整批，TX 满时保留未执行输入并优先发送回复。
+不扫描数据中的指令字节，不复制 MPSSE/TAP 状态，也不把批次当作 Flash 页。
+运行时的公共时基由启动路径初始化，USB、GPIO和LED都只读。
 
 ## GPIO 边界
 
@@ -60,5 +66,5 @@ JTAG 核只调用 `JtagIoOps` 的命令级操作。逐边沿仍直接读写 CH32
 - `0x86` 两个分频参数仍直接丢弃，TCK 使用当前固定档位。
 - 未知命令仍回复 `FA opcode`。
 - reset、两种 purge 和 MPSSE fault 的映射顺序不变。
-- Manager 执行 GPIO 时由 port 临界区屏蔽 USBD IRQ；硬件端点保持 NAK，
-  完成不可拆分时序后再继续接收 bulk OUT。
+- Manager 执行 GPIO 时由 port 临界区保存并关闭全局可屏蔽中断，执行完恢复
+  进入前的使能位；UART DMA 仍可运行，USB接收由端点NAK施加背压。

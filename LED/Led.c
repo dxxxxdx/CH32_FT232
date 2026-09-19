@@ -1,4 +1,5 @@
 #include "Led.h"
+#include "SystemTimebase.h"
 
 /* 模式值来自 CH32V20x GPIOx_CFGLR/CFGHR 的 MODE/CNF 四位字段。 */
 #define LED_GPIO_MODE_OUTPUT_PP_50MHZ (0x03UL)
@@ -6,15 +7,10 @@
 #define LED_GPIO_BITS_PER_PIN         (4U)
 #define LED_GPIO_FIELD_MASK           (0x0FUL)
 #define LED_GPIO_LOW_PIN_COUNT        (8U)
-/* WCH SysTick：HCLK、自重载、无中断计数。 */
-#define LED_SYSTICK_FREE_RUNNING      (0x0000000DUL)
-
-static uint8_t led_timebase_started;
 
 static void led_write(const Led *self, uint8_t active);
 static void led_configure_output(const Led *self);
 static uint32_t led_time_now(void);
-static void led_timebase_start(void);
 
 void Led_Init(const Led *const self)
 {
@@ -77,10 +73,6 @@ void Led_Service(const Led *const self)
     {
         return;
     }
-    if (led_timebase_started == 0U)
-    {
-        led_timebase_start();
-    }
 
     now = led_time_now();
     if (state->service_armed == 0U)
@@ -136,17 +128,5 @@ static void led_configure_output(const Led *const self)
 
 static uint32_t led_time_now(void)
 {
-    const volatile uint32_t *const systick_low =
-        (const volatile uint32_t *)(uintptr_t)&SysTick->CNT;
-
-    return *systick_low;
-}
-
-static void led_timebase_start(void)
-{
-    SysTick->CTLR = 0U;
-    SysTick->CNT = 0U;
-    SysTick->CMP = UINT64_MAX;
-    SysTick->CTLR = LED_SYSTICK_FREE_RUNNING;
-    led_timebase_started = 1U;
+    return SystemTimebase_Now(&SystemTimebase0);
 }

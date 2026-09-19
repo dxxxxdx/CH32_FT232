@@ -45,6 +45,10 @@ typedef struct
     MpssePortResult (*tx_write)(const MpssePort *self,
                                 const uint8_t *data,
                                 uint16_t length);
+    /* 运行时只读时基；无符号差值由BSP换算，避免低字先除频的回绕错误。 */
+    uint32_t (*time_now)(const MpssePort *self);
+    uint8_t (*time_elapsed)(const MpssePort *self, uint32_t start, uint16_t ms);
+    /* GPIO执行期屏蔽可屏蔽中断，token必须恢复进入前状态。 */
     uint8_t (*interrupt_lock)(const MpssePort *self);
     void (*interrupt_unlock)(const MpssePort *self, uint8_t token);
 } MpssePortOps;

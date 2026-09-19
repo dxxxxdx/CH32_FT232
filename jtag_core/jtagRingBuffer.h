@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 
-#define JTAG_RING_BUFFER_SIZE (2048U)
 #define JTAG_RING_BUFFER_FLASH __attribute__((section(".rodata.jtag_rb")))
 
 typedef struct JtagRingBuffer JtagRingBuffer;
@@ -25,7 +24,6 @@ typedef struct
 
 typedef struct
 {
-    uint8_t data[JTAG_RING_BUFFER_SIZE];
     uint16_t read_pos;
     uint16_t write_pos;
     uint16_t used;
@@ -35,15 +33,23 @@ struct JtagRingBuffer
 {
     const JtagRingBufferOps *const ops;
     JtagRingBufferState *const state;
+    uint8_t *const data;
+    const uint16_t mask;
 };
 
 extern const JtagRingBufferOps JtagRingBufferOps0;
 
-#define JTAG_RING_BUFFER_DEFINE(name)                                      \
+#define JTAG_RING_BUFFER_DEFINE(name, size)                                \
+    _Static_assert((size) >= 2U && (size) <= 32768U &&                     \
+                   (((size) & ((size) - 1U)) == 0U),                      \
+                   "JTAG ring capacity must be a bounded power of two"); \
+    static uint8_t name##_data[size];                                     \
     static JtagRingBufferState name##_state;                               \
     static const JtagRingBuffer name JTAG_RING_BUFFER_FLASH = {            \
         .ops = &JtagRingBufferOps0,                                         \
-        .state = &name##_state                                              \
+        .state = &name##_state,                                             \
+        .data = name##_data,                                                \
+        .mask = (size) - 1U                                                 \
     }
 
 #endif /* CH32_FT232_JTAG_RING_BUFFER_H */

@@ -9,7 +9,8 @@
 extern "C" {
 #endif
 
-#define JTAG_MANAGER_BUFFER_SIZE (JTAG_RING_BUFFER_SIZE)
+#define JTAG_MANAGER_RX_BUFFER_SIZE (4096U)
+#define JTAG_MANAGER_TX_BUFFER_SIZE (512U)
 
 /* 当前链接脚本将 .srodata 收进 RAM 的 .data，不能只依靠 const。
  * 显式归入 .rodata.*，由 Link.ld 的 .text 输出段放入 FLASH。
@@ -54,9 +55,13 @@ typedef struct {
     uint8_t tap_state;
     uint8_t current_instruction;
     uint8_t erase_wait_clocked;
+    uint8_t erase_wait_armed;
+    uint8_t prepare_phase;
     uint8_t program_active;
     uint8_t program_word[4];
     uint8_t program_word_stage;
+    /* 0=无；01/81=尚未输出的两拍退出。TAP仍停在真实Exit1，不复制影子状态。 */
+    uint8_t program_exit_data;
 } JtagGowinState;
 
 typedef struct {
@@ -75,12 +80,12 @@ typedef struct {
     JtagState *const state;
 } JTAGManager;
 
-/* 两个 2 KiB RB 与 manager 分别静态装配。manager 只持有 RB 的 ops 边界，
+/* RX 4 KiB、TX 512 B 与 manager 分别静态装配。manager 只持有 RB 的 ops 边界，
  * 不再拥有或跨层访问数组和索引；GPIO 同样只通过 JtagIo 的命令级 ops 使用。
  */
 #define JTAG_MANAGER_DEFINE(name, io_object)                                 \
-    JTAG_RING_BUFFER_DEFINE(name##_rx);                                      \
-    JTAG_RING_BUFFER_DEFINE(name##_tx);                                      \
+    JTAG_RING_BUFFER_DEFINE(name##_rx, JTAG_MANAGER_RX_BUFFER_SIZE);          \
+    JTAG_RING_BUFFER_DEFINE(name##_tx, JTAG_MANAGER_TX_BUFFER_SIZE);          \
     static const JtagConfig name##_config JTAG_MANAGER_FLASH = {             \
         .io = &(io_object),                                                   \
         .rx = &name##_rx,                                                     \
@@ -139,8 +144,13 @@ JtagRxPacketResult JTAGManager_RxWritePacket(const JTAGManager *self,
                                              const uint8_t *data,
                                              uint16_t length);
 
+/* 只发布队列占用，收包批处理不借用数组或复制解析/TAP状态。 */
+uint16_t JTAGManager_RxUsed(const JTAGManager *self);
+uint16_t JTAGManager_RxFree(const JTAGManager *self);
+
 /* 推进增量解析和 GPIO 移位，普通路径最多产生 clock_budget 个 TCK 周期。
  * clock_budget 建议至少为 8；不足以执行下一个完整操作时返回预算耗尽。
+ * Gowin编程含不可拆的32拍DR及最多10拍退出合并，预算应至少为32。
  * 解析输入的数量另外限制为入口时 RX 的 used。
  * 每个不可拆的位操作或字节移位开始前检查预算及回复容量，不能先产生
  * 时钟再因 TX 满而丢回读数据。只接受 BL702 普通路径已有的 opcode；
@@ -151,9 +161,14 @@ JtagRxPacketResult JTAGManager_RxWritePacket(const JTAGManager *self,
  * Loopback、分频和其它初始化兼容命令保持 BL702 的占位行为；0x86 的
  * 两字节分频参数始终丢弃，TCK 只由当前 GPIO 移位实现的固定档位决定。
  * Gowin 原子路径不受 USB 分包影响：0x71 编程 IR 后，把 0x11/24 bit、
- * 0x13/7 bit、0x4B/末位合成连续 DR32。Flash 控制流
- * 依据 TAP 状态区分 IR 与 DR；只有 0x75 后的大块零等待流才替换成一次
+ * 0x13/7 bit、0x4B/末位合成连续 DR32。
+ * 对编程DR后的两拍Update/Idle暂存，后续同TDI、首TMS=0的输出命令收齐后，
+ * 合并退出与首批Idle时钟；不增删时钟。等待输入时仍停在Exit1，返回WAIT_RX。
+ * 非匹配后继或执行屏障先按原样输出暂存退出；RxPurge/Reset显式取消它。
+ * Flash控制流依据 TAP 状态区分 IR 与 DR；只有 0x75 后的大块零等待流才替换成一次
  * 固定连续擦除窗口，不能把普通配置数据或同一等待流的后续分块误判进去。
+ * 05/09 完成 SRAM 擦除并经 3A/02 退出后，在真实返回 Idle 时补一次
+ * 连续 600 us 准备窗口；普通 SRAM 下载也会增加这一个短窗口。
  * 内核不处理传输 latency，也不等待外层发送完成；Service 每轮优先推进 TX。
  * Manager 自身不改变中断状态；调用者通过数据 port 的临界区
  * 保证一次 Service 内的 GPIO 时序不被新 USB 包打断。

@@ -4,6 +4,7 @@
 #include "debug.h"
 #include "ft232Descriptor.h"
 #include "usb_lib.h"
+#include "SystemTimebase.h"
 
 #define USB_REQUEST_DIRECTION_IN       (0x80U)
 #define USB_VENDOR_HOST_TO_DEVICE      (0x40U)
@@ -1371,10 +1372,7 @@ static void ft232_usbd_cancel_queued_idle_status(Ft232UsbdState *const state)
 
 static uint32_t ft232_usbd_systick_low(void)
 {
-    const volatile uint32_t *const systick_low =
-        (const volatile uint32_t *)(uintptr_t)&SysTick->CNT;
-
-    return *systick_low;
+    return SystemTimebase_Now(&SystemTimebase0);
 }
 
 static void ft232_usbd_cancel_channel(Ft232UsbdChannelState *const channel)

@@ -21,12 +21,21 @@ JtagRxPacketResult JTAGManager_RxWritePacket(const JTAGManager *const self,
         return JTAG_RX_PACKET_BACKPRESSURE;
     }
 
-    /* USB transfer 的长度由主机批处理策略决定，不能拿它当 Gowin 页边界。
-     * 64 字节包持续进入解析器；跨包的 MPSSE 相位和 DR32 暂存均由 manager
-     * 自己持有，因此 3313 字节的高云批次不需要占用同尺寸 RAM。
+    /* USB批次并不等于Gowin页。收包调度由service负责，跨批次的MPSSE
+     * 相位和DR32暂存仍只属于manager，满队列不覆盖未执行的字节。
      */
     rx->ops->write(rx, data, length);
     return JTAG_RX_PACKET_ACCEPTED;
+}
+
+uint16_t JTAGManager_RxUsed(const JTAGManager *const self)
+{
+    return self->config->rx->ops->used(self->config->rx);
+}
+
+uint16_t JTAGManager_RxFree(const JTAGManager *const self)
+{
+    return self->config->rx->ops->free(self->config->rx);
 }
 
 uint16_t JTAGManager_TxPeek(const JTAGManager *const self,

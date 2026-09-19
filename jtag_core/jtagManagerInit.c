@@ -49,7 +49,10 @@ static void jtag_clear_gowin(JtagGowinState *const state)
     state->tap_state = 0U;
     state->current_instruction = 0U;
     state->erase_wait_clocked = 0U;
+    state->erase_wait_armed = 0U;
+    state->prepare_phase = 0U;
     state->program_active = 0U;
     state->program_word_stage = 0U;
+    state->program_exit_data = 0U;
     /* program_word 随 stage=0 失效，下一组 DR32 会完整覆盖，不浪费启动时间。 */
 }
