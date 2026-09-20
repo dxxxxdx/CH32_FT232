@@ -16,6 +16,18 @@ extern "C" {
 #define FTDI_USB_PRODUCT_ID            (0x6010U)
 #define FTDI_USB_DEVICE_RELEASE        (0x0500U)
 #define FTDI_USB_CONFIGURATION_VALUE   (0x01U)
+#if UART_FORWARD_ENABLED != 0U
+/* Windows 依靠 EF/02/01 识别配置描述符中的 IAD，并把 CDC 控制/数据
+ * 接口作为同一个功能枚举。纯 FT2232 形态保持原有的 00/00/00。
+ */
+#define FTDI_USB_DEVICE_CLASS          (0xEFU)
+#define FTDI_USB_DEVICE_SUBCLASS       (0x02U)
+#define FTDI_USB_DEVICE_PROTOCOL       (0x01U)
+#else
+#define FTDI_USB_DEVICE_CLASS          (0x00U)
+#define FTDI_USB_DEVICE_SUBCLASS       (0x00U)
+#define FTDI_USB_DEVICE_PROTOCOL       (0x00U)
+#endif
 /* FT2232 始终保留 A/B 两个接口；UART 打开时再追加一组 CDC ACM 接口。 */
 #define FTDI_USB_INTERFACE_COUNT       (2U)
 #if UART_FORWARD_ENABLED != 0U
@@ -83,7 +95,10 @@ extern "C" {
 #define FTDI_USB_PRODUCT_DESC_SIZE     (28U)
 #define FTDI_USB_SERIAL_DESC_SIZE      (46U)
 #define FTDI_USB_BOS_DESC_SIZE         (33U)
-#define FTDI_USB_MS_OS_20_DESC_SIZE    (46U)
+/* Set/Configuration/Function/Compatible-ID 共 46 字节，随后是 132 字节
+ * DeviceInterfaceGUIDs registry property。
+ */
+#define FTDI_USB_MS_OS_20_DESC_SIZE    (178U)
 
 /* bcdUSB=2.10 用于让 Windows 查询 BOS/MS OS 2.0；物理链路仍为 Full Speed。 */
 #define FTDI_USB_MS_OS_20_VENDOR_CODE  (0x20U)
