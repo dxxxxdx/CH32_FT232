@@ -1,0 +1,30 @@
+#ifndef CH32_FT232_GENERATED_USER_BOARD_H
+#define CH32_FT232_GENERATED_USER_BOARD_H
+
+/* CMake 根据 userconfig.cmake 生成；通过 GUI 修改，不能编辑构建产物。 */
+#define BOARD_JTAG_OUTPUT_PORT       GPIOA
+#define BOARD_JTAG_OUTPUT_PORT_CLOCK RCC_IOPAEN
+#define BOARD_JTAG_TCK_PIN           (@PINSELECT_TCK_INDEX@U)
+#define BOARD_JTAG_TMS_PIN           (@PINSELECT_TMS_INDEX@U)
+#define BOARD_JTAG_TDI_PIN           (@PINSELECT_TDI_INDEX@U)
+#define BOARD_JTAG_TDO_PORT          GPIOA
+#define BOARD_JTAG_TDO_PORT_CLOCK    RCC_IOPAEN
+#define BOARD_JTAG_TDO_PIN           (@PINSELECT_TDO_INDEX@U)
+
+#define BOARD_USB_PORT         GPIOA
+#define BOARD_USB_PORT_CLOCK   RCC_IOPAEN
+#define BOARD_USB_DM_PIN       (11U)
+#define BOARD_USB_DP_PIN       (12U)
+#define BOARD_USB_CLOCK_SOURCE RCC_USBCLKSource_PLLCLK_Div3
+
+#define BOARD_HAS_UART (@PINSELECT_HAS_UART@U)
+#if @PINSELECT_UART_PA23@
+#include "boardtype/Ch32V203Usart2Pa23.h"
+#elif @PINSELECT_UART_PB67@
+#include "boardtype/Ch32V203Usart1Pb67.h"
+#endif
+
+/* 本轮自定义界面不提供运行灯引脚。 */
+#define BOARD_HAS_RUN_LED (0U)
+
+#endif /* CH32_FT232_GENERATED_USER_BOARD_H */

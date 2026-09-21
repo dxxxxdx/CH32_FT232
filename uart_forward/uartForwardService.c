@@ -1,6 +1,6 @@
 #include "uartForwardService.h"
 
-#include "UartForwardConfig.h"
+#include "boardtype/BoardConfig.h"
 #include "ft232CdcPort.h"
 #include "uart2DmaPort.h"
 

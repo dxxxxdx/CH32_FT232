@@ -1,5 +1,5 @@
 #include "debug.h"
-#include "GPIO_Cfg.h"
+#include "boardtype/BoardGpio.h"
 #include "ft232Usbd.h"
 #include "ftdiJtagService.h"
 #include "LedInstances.h"
@@ -13,7 +13,7 @@ int main(void)
     Delay_Init();
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_1);
 
-    GPIO_Cfg_Init(&GpioCfg0);
+    BoardGpio_Init(&BoardGpio0);
     LedInstances_Init();
     Ft232Usbd_Init(&Ft232Usbd0);
     FtdiJtagService0_Init();

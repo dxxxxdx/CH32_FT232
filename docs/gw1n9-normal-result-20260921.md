@@ -1,5 +1,7 @@
 # LOCAL_IDLE实测失败与连续提交候选版
 
+> 历史调试记录：正文中的状态、路径与候选版名称均指记录当时。当前用法见[项目 README](../readme.md)，最终 Flash 修复结果见[成功记录](gw1n9-flash-success-20260921.md)。本地日志、工具和旧固件路径不作为发布附件。
+
 后续20:48：本文ATOMIC_COMMIT候选版单页上板仍失败；最新DR_TRANSACTION候选版暂存进入Shift-DR命令，见[后续记录](gw1n9-atomic-result-20260921.md)。
 
 2026-09-21 20:37，用户确认烧入后，USB核对为`CH32_FTDI_260921122636`，符合上一版LOCAL_IDLE固件。只有该CH32下载器，没有并行运行的Programmer/minicom。FPGA原始ID由Python确认1100481B；OFL显示的100481B是其型号识别显示。

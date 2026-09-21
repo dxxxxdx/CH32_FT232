@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "UartForwardConfig.h"
+#include "boardtype/BoardConfig.h"
 #include "byteStreamPort.h"
 
 typedef enum

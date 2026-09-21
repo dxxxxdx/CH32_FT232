@@ -12,36 +12,33 @@
 
 3. USB BSP 这一层耦合比较重，我也不喜欢一大坨代码，不过 USB 枚举本来就是个烦人的状态机，强行拆开不一定更好看。
 
-4. 当前 CMake 固定使用 **22PINOUT**，会覆盖旧构建目录中的板型缓存。引脚由 `boardtype/22pinout.h` 定义：
+4.
+    想写自己的配置？请去 /PinSelectGUI ,如果你连python环境都配不好，那么估计接下来你也编译不出来固件
+    当然，你让ai帮你动手是最省事的
+    TCK、TDI、TMS 尽量放在同一个 GPIO 端口。TDO 也别悬空，没接目标时至少保证它有个稳定的空闲高电平。
 
-   - TCK：PA6
-   - TDI：PA5
-   - TDO：PA4
-   - TMS：PA7
+5. USB 串口固定为 **115200 8N1**，RX/TX 都走 DMA，缓冲区各 512 字节。UART 可以在编译时二选一，也可以禁用
+    但是谁不喜欢免费的uart呢，反正还有那么大ram
 
-   TCK、TDI、TMS 尽量放在同一个 GPIO 端口。TDO 也别悬空，没接目标时至少保证它有个稳定的空闲高电平。
-
-5. USB 串口固定为 **115200 8N1**，RX/TX 都走 DMA，缓冲区各 512 字节。22PINOUT 的 UART 固定布线为 PB6/PB7，可在构建时关闭转发：
-
-   - `PB67`：PB6/PB7，默认；
-   - `DISABLED`：关闭 UART 转发。
+    - `PA23`：PA2/PA3，默认；
+    - `PB67`：PB6/PB7。
 
    ```bash
-   cmake -S . -B build-22 -DUART_FORWARD_PORT_SELECT=PB67
-   cmake -S . -B build-22-jtag -DUART_FORWARD_PORT_SELECT=DISABLED
+   cmake -S . -B build -DUART_FORWARD_PORT_SELECT=PA23
+   cmake -S . -B build-pb67 -DUART_FORWARD_PORT_SELECT=PB67
    ```
 
-6. 22PINOUT 没有运行灯，CMake 固定关闭 LED 实例及其 GPIO 配置。
+6. LED自己配好就行，钩子都可以用
 
-7. 已经在 Gowin GW1NZ-1 上试过，Windows 版 Gowin Programmer 可以直接烧 SRAM 和片内 Flash，`openFPGALoader` 也能正常识别 JTAG 链：
+7. 已经在 Gowin GW1NZ-1，还有GW1N-9 上试过，Windows 版 Gowin Programmer 可以直接烧 SRAM 和片内 Flash，`openFPGALoader` 也能正常识别 JTAG 链：
 
    ```bash
    openFPGALoader -c ft2232 --detect
    ```
 
-8. Linux 版 Gowin Programmer 的兼容性比较玄学，尤其是新发行版。仓库里留了一个 [`gowin-ubuntu26-startprogrammer.sh`](gowin-ubuntu26-startprogrammer.sh)，需要时可以拿去看日志或者绕一下它的 USB 问题。
+8. Linux 版 Gowin Programmer 的兼容性比较玄学，而且经常缩成魔丸，尤其是新发行版。仓库里留了一个 [`gowin-ubuntu26-startprogrammer.sh`](gowin-ubuntu26-startprogrammer.sh)，需要时可以拿去看日志或者绕一下它的 USB 问题。
 
-9. JTAG/MPSSE 使用 **RX 4 KiB、TX 1 KiB** 静态缓冲，收包和 JTAG 行为按本地 BL702 `usb2uartjtag` 移植：普通 OUT 包立即执行，首包前 32 字节命中编程页头才连续收集；非零短包完成批次，满 4 KiB 在下一次 OUT 到达时先执行旧批次，没有 2 ms 超时。整批关中断执行，收集期间不提交 IN。USB 每包 64 字节，IN 最多 62 字节有效数据，跨 TX 环尾也不提前发短包。移植范围与保留行为见 [JTAG 内核说明](jtag_core/jtagManager.md)。**9C正常MPSSE路径已通过单页64字读回、openFPGALoader完整Flash烧录及独立重新加载检查，用户确认断电重上电后LED仍闪烁；已验证串号CH32_FTDI_260921125322。**见[当前实测记录](docs/gw1n9-flash-success-20260921.md)，本文历史烧录及测速结果不代表此版。
+9. JTAG/MPSSE 的 USB 接收队列为 **4 KiB**，发送队列为 **512 B**，均静态分配。接收侧先缓存一批，再关中断连续执行；短包、队列不足容纳下一包或末包后空闲 2 ms 时开始执行。这个机制参考了 BL702，避免每个 64 字节 USB 包都打断 Flash 编程。USB 端点包长仍为 64 字节，UART 缓冲区另计；剩余 RAM 以链接器输出为准。
 
 10. 如果 bitstream 很大或者经常烧 Flash，速度就别抱太高期待了。目前没有做 SPI 直连加速，主打一个能用。
 
@@ -55,8 +52,7 @@
 
 15. 垃圾windows兼容性还是有问题，我怀疑我的测试环境卡驱动了，linux已经都可以正常烧录了
 
-16. 如果你要指定io口画自己的板子，请让ai给你写个头文件，本项目宏定义和覆写很乱
-
 17. 本项目编译的时候自带时间戳，固件更新可以wchisp直接usb烧录，不过这个应该就不用我教了，否则这点能力没有你确实不适合玩fpga
 
 > **最后提醒：**目前 JTAG 频率调节还不支持，上位机设置的速度会被直接忽略；MPSSE 指令也没有全部实现，只覆盖了现阶段实际用到的下载流程。换软件、换芯片或者玩冷门命令之前，先默认这里欠支持。
+

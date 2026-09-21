@@ -2,7 +2,7 @@
 #define CH32_FT232_LED_INSTANCES_H
 
 #include "Led.h"
-#include "LedInstancesConfig.h"
+#include "boardtype/BoardConfig.h"
 
 #if RUN_LED_ENABLED != 0U
 extern const Led RunLed0;

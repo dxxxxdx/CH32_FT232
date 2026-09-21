@@ -1,16 +1,20 @@
-# GW1NR-9C 正常MPSSE内置Flash烧录通过
+# GW1N(R)-9C 正常 MPSSE 内置 Flash 烧录成功记录
+
+> 本文记录特定固件的硬件结果。后续板级配置、GUI 与构建流程改动不自动继承该验证结论；当前使用说明见[项目 README](../readme.md)。
 
 2026-09-21 20:58，用户手动刷入DR_TRANSACTION固件后，在同一9C板、同一CH32和同一LED文件上完成单页实际读回、openFPGALoader完整Flash烧录及独立重新加载检查。
 
 ## 已验证固件与输入
 
-- 分支`1n9fix`，未提交工作区；本轮未继续改动固件源码或重新编译。
-- MCU USB串号`CH32_FTDI_260921125322`，固定22pinout，ACM/UART关闭。
-- BIN：`firmware-22pinout-dr-transaction-20260921-2053/CH32_FT232_22PINOUT_DR_TRANSACTION.bin`。
+- 当时分支为 `1n9fix`，测试的是当时工作区构建的 DR_TRANSACTION 固件，以串号和校验值标识。
+- MCU USB串号`CH32_FTDI_260921125322`，22PINOUT 接线，ACM 调试及 UART 转发关闭。
+- 历史 BIN 路径：`firmware-22pinout-dr-transaction-20260921-2053/CH32_FT232_22PINOUT_DR_TRANSACTION.bin`。
 - BIN SHA256：`201bafbdef2b5c5326f15daea21bec1c2c56a91897c63ddc0c1006743bf5e017`。
 - FPGA原始IDCODE：`1100481B`，openFPGALoader显示型号GW1N(R)-9C。
-- 文件：`/home/dxxdx/FPGAProjects/9K_LED_project.fs`，SHA256 `7f7da59b6dabd011c751d7f26db1ebd47de11adbe5b47f1c877e99103d4ba06b`，校验值63BD。
+- 文件：`9K_LED_project.fs`，SHA256 `7f7da59b6dabd011c751d7f26db1ebd47de11adbe5b47f1c877e99103d4ba06b`，校验值63BD。
 - 原始日志：`logs/gw1n9-dr-transaction-20260921-205822/`。
+
+历史 BIN 归档目录已不在当前工作区；上述路径和原始日志路径用于追溯，不表示发布包包含这些附件。
 
 ## 硬件结果
 
@@ -35,10 +39,10 @@
 
 RX仍4096字节、TX1024字节，BL702批次策略不变；准备/擦除/地址/字后拍数仍1200/600000/32/24。未尝试恢复所有历史改动来证明哪些是最低必要条件；没有同板BL702对照。
 
-## 当前状态与未覆盖项
+## 验证边界
 
-当前MCU保留已验证固件，FPGA内置Flash已写入LED设计，最后独立reload状态及校验通过，不需要再刷一版MCU。
+本次记录结束时，FPGA 内置 Flash 已写入 LED 设计，独立 reload 状态及校验通过；本文不描述设备此后的固件或 Flash 内容。
 
-用户随后明确确认：“已断电重上电，LED 仍闪烁”。冷启动观察通过，证据来源为用户现场反馈；未将软件reload冒充断电测试。当前固件的Gowin Programmer GUI路径尚未重测，不能由openFPGALoader成功直接宣称GUI也已验证。
+用户随后明确确认：“已断电重上电，LED 仍闪烁”。冷启动观察通过，证据来源为用户现场反馈；未将软件reload冒充断电测试。这份已验证固件的 Gowin Programmer GUI 路径未重测，不能由openFPGALoader成功直接宣称GUI也已验证。
 
-本轮只做授权的板上操作和记录整理，没有运行本地测试套件，没有刷写MCU，没有改写外置Flash。
+本次实测范围为 FPGA 内置 Flash；MCU 固件由用户手动刷入，外置 Flash 未纳入测试。

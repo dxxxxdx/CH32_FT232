@@ -1,5 +1,7 @@
 # ATOMIC_COMMIT实测与完整DR事务候选版
 
+> 历史调试记录：正文中的状态、路径与候选版名称均指记录当时。当前用法见[项目 README](../readme.md)，最终 Flash 修复结果见[成功记录](gw1n9-flash-success-20260921.md)。本地日志、工具和旧固件路径不作为发布附件。
+
 后续20:58：本文交付的DR_TRANSACTION已通过单页64字读回、openFPGALoader完整Flash烧录和独立reload检查。见[成功记录](gw1n9-flash-success-20260921.md)。下文“尚未验证”保留为交付时状态。
 
 2026-09-21 20:48，用户刷入后，核对USB串号`CH32_FTDI_260921124313`，FPGA原始ID`1100481B`。运行一次与上一轮相同的分阶段单页探针，仅替换串号。没有自动重试，未刷写MCU，未触碰外置Flash。

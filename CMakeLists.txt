@@ -56,47 +56,38 @@ set(LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/Ld/Link.ld")
 set(GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(FTDI_USB_SERIAL_HEADER "${GENERATED_INCLUDE_DIR}/ftdiUsbBuildSerial.h")
 
-# 当前分支固定使用 22PINOUT；覆盖旧构建目录的板型缓存，防止沿用旧引脚。
-set(BOARD_TYPE "22PINOUT" CACHE STRING "Fixed board: 22PINOUT" FORCE)
-set_property(CACHE BOARD_TYPE PROPERTY STRINGS 22PINOUT)
-set(BOARD_DEFINITION BOARD_22PINOUT=1U)
-message(STATUS "Board type = 22PINOUT (fixed)")
+# 硬件需求只读取 GUI 保存的文件，旧板型/UART 缓存不能覆盖它。
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/loadUserConfig.cmake")
+set(PINSELECT_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/userconfig.cmake")
+pinselect_load_config("${PINSELECT_CONFIG_FILE}" "${CMAKE_CURRENT_SOURCE_DIR}/boardtype")
+set(BOARD_DEFINITION "${PINSELECT_BOARD_DEFINE}")
+file(MAKE_DIRECTORY "${GENERATED_INCLUDE_DIR}")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/boardtype/UserBoardConfig.h.in"
+        "${GENERATED_INCLUDE_DIR}/userBoardConfig.h" @ONLY)
+if(DEFINED BOARD_TYPE OR DEFINED UART_FORWARD_PORT_SELECT OR DEFINED UART_FORWARD_ENABLE)
+    message(STATUS "Legacy board/UART options are ignored; hardware comes from userconfig.cmake")
+endif()
 
-# 22PINOUT 没有运行灯，旧缓存中的 ON 也必须关闭，避免误配置灯脚。
-set(RUN_LED_ENABLE OFF CACHE BOOL "22PINOUT has no run LED" FORCE)
-set(RUN_LED_DEFINITION RUN_LED_ENABLED=0U)
-message(STATUS "Run LED = DISABLED (22PINOUT has no run LED)")
-
-# UART 转发默认使用 22PINOUT 板的 PB6/PB7；需要纯 FT2232/JTAG 固件时
-# 可显式传 DISABLED，主循环入口保持不变，由服务头提供空实现。
+option(RUN_LED_ENABLE "Enable the selected board's run LED" OFF)
 option(JTAG_ACM_TRACE "Use CDC ACM exclusively for deferred JTAG diagnostics" OFF)
-set(UART_FORWARD_PORT_SELECT "PB67" CACHE STRING
-        "UART forwarding: DISABLED or PB67")
-set_property(CACHE UART_FORWARD_PORT_SELECT PROPERTY STRINGS DISABLED PB67)
+set(UART_FORWARD_BUILD_ENABLED OFF)
+if(PINSELECT_HAS_UART)
+    set(UART_FORWARD_BUILD_ENABLED ON)
+endif()
 if(JTAG_ACM_TRACE)
-    set(UART_FORWARD_PORT_SELECT "DISABLED")
+    set(UART_FORWARD_BUILD_ENABLED OFF)
     message(STATUS "JTAG ACM trace = ON; CDC reserved for diagnostics")
 endif()
-
-set(UART_FORWARD_PORT_DEFINITION "")
-set(UART_FORWARD_BUILD_ENABLED ON)
-string(TOUPPER "${UART_FORWARD_PORT_SELECT}" UART_FORWARD_PORT_NORMALIZED)
-if(UART_FORWARD_PORT_NORMALIZED STREQUAL "" OR
-   UART_FORWARD_PORT_NORMALIZED STREQUAL "DISABLED")
-    set(UART_FORWARD_PORT_DEFINITION
-            UART_FORWARD_PORT=UART_FORWARD_PORT_DISABLED)
-    set(UART_FORWARD_BUILD_ENABLED OFF)
-    message(STATUS "UART forwarding = DISABLED")
-elseif(UART_FORWARD_PORT_NORMALIZED STREQUAL "PA23")
-    message(FATAL_ERROR "22PINOUT UART forwarding only supports PB67 or DISABLED")
-elseif(UART_FORWARD_PORT_NORMALIZED STREQUAL "PB67")
-    set(UART_FORWARD_PORT_DEFINITION
-            UART_FORWARD_PORT=UART_FORWARD_PORT_PB67)
-    message(STATUS "UART forwarding port = PB67")
-else()
-    message(FATAL_ERROR
-            "UART_FORWARD_PORT_SELECT must be DISABLED or PB67, got: ${UART_FORWARD_PORT_SELECT}")
+if(RUN_LED_ENABLE AND NOT PINSELECT_MODE STREQUAL "20PINOUT")
+    message(FATAL_ERROR "The selected configuration has no run LED; set RUN_LED_ENABLE=OFF")
 endif()
+message(STATUS "Final config file = ${PINSELECT_CONFIG_FILE}")
+message(STATUS "Board preset = ${PINSELECT_MODE}")
+message(STATUS "JTAG: TCK=${PINSELECT_TCK}, TMS=${PINSELECT_TMS}, TDI=${PINSELECT_TDI}, TDO=${PINSELECT_TDO}")
+message(STATUS "UART route = ${PINSELECT_UART_DESCRIPTION}; forwarding=${UART_FORWARD_BUILD_ENABLED}; 115200 8N1")
+message(STATUS "USB: DM=PA11, DP=PA12")
+message(STATUS "Run LED = ${RUN_LED_ENABLE}; JTAG ACM trace = ${JTAG_ACM_TRACE}")
+message(STATUS "FTDI USB serial timestamp is generated independently by CMake at build time (UTC)")
 
 if(NOT EXISTS "${LINKER_SCRIPT}")
     message(FATAL_ERROR "Linker script not found: ${LINKER_SCRIPT}")
@@ -194,7 +185,6 @@ add_executable(${TARGET_NAME}
         ${PROJECT_C_SOURCES}
         ${PROJECT_CXX_SOURCES}
         ${PROJECT_ASM_SOURCES}
-        boardtype/22pinout.h
         boardtype/BoardConfig.h
 )
 
@@ -262,8 +252,8 @@ target_include_directories(${TARGET_NAME} PRIVATE
 target_compile_definitions(${TARGET_NAME} PRIVATE
         CH32V20x_D6
         ${BOARD_DEFINITION}
-        ${UART_FORWARD_PORT_DEFINITION}
-        ${RUN_LED_DEFINITION}
+        UART_FORWARD_ENABLED=$<BOOL:${UART_FORWARD_BUILD_ENABLED}>
+        RUN_LED_ENABLED=$<BOOL:${RUN_LED_ENABLE}>
         JTAG_ACM_TRACE_ENABLED=$<BOOL:${JTAG_ACM_TRACE}>
 )
 
@@ -338,3 +328,23 @@ if(EXISTS "${EANALY_EXE}")
             COMMENT "Running WCH post-analysis..."
     )
 endif()
+
+# 保持 CH32_FT232 为 CLion 的直接构建目标，所有产物和分析完成后再打印。
+# 使用本次配置解析后的值，确保摘要与已编译宏一致，不在构建末尾重读文件。
+add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E echo ""
+        COMMAND "${CMAKE_COMMAND}" -E echo "========== 最终固件配置 =========="
+        COMMAND "${CMAKE_COMMAND}" -E echo "板型: ${PINSELECT_MODE}"
+        COMMAND "${CMAKE_COMMAND}" -E echo
+            "JTAG: TCK=${PINSELECT_TCK}  TMS=${PINSELECT_TMS}  TDI=${PINSELECT_TDI}  TDO=${PINSELECT_TDO}"
+        COMMAND "${CMAKE_COMMAND}" -E echo
+            "UART: ${PINSELECT_UART_DESCRIPTION} | 转发=${UART_FORWARD_BUILD_ENABLED} | 115200 8N1"
+        COMMAND "${CMAKE_COMMAND}" -E echo "USB: DM=PA11  DP=PA12"
+        COMMAND "${CMAKE_COMMAND}" -E echo
+            "运行灯=${RUN_LED_ENABLE}  ACM调试=${JTAG_ACM_TRACE}"
+        COMMAND "${CMAKE_COMMAND}" -E echo "配置文件: ${PINSELECT_CONFIG_FILE}"
+        COMMAND "${CMAKE_COMMAND}" -E echo "固件: $<TARGET_FILE:${TARGET_NAME}>"
+        COMMAND "${CMAKE_COMMAND}" -E echo "=================================="
+        COMMENT "Printing final firmware pin configuration..."
+        VERBATIM
+)

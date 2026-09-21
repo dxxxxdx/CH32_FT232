@@ -6,7 +6,7 @@
 #include "ch32v20x.h"
 #include "ft232Descriptor.h"
 
-struct GpioCfg;
+struct BoardGpio;
 
 typedef enum
 {
@@ -19,7 +19,7 @@ typedef struct
 {
     uint32_t usb_clock_source;
     NVIC_InitTypeDef interrupt;
-    const struct GpioCfg *const gpio;
+    const struct BoardGpio *const gpio;
 } Ft232UsbdConfig;
 
 /* 每个 FT2232 通道各有一个 64 字节静态邮箱：ISR 填满后不重开端点，

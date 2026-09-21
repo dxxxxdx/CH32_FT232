@@ -25,7 +25,7 @@ struct JtagIo
     const void *const context;
 };
 
-/* 由 GPIO_Cfg 提供的编译期板级实现。 */
+/* 由 boardtype/BoardGpio 提供的编译期板级实现。 */
 extern const JtagIo JtagIo0;
 
 #endif /* CH32_FT232_JTAG_IO_H */

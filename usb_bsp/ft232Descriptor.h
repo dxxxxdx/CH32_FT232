@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "UartForwardConfig.h"
+#include "boardtype/BoardConfig.h"
 
 #ifdef __cplusplus
 extern "C" {

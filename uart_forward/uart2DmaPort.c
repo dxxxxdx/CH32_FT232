@@ -4,13 +4,13 @@
 #include <string.h>
 
 #include "Hook.h"
-#include "UartForwardConfig.h"
+#include "boardtype/BoardConfig.h"
 #include "ch32v20x.h"
 
 #define UART_DMA_FLASH __attribute__((section(".rodata.uart_dma")))
 #define UART_DMA_BUFFER_ALIGNMENT __attribute__((aligned(4)))
 #define UART_DMA_BRR_VALUE \
-    ((UART_FORWARD_PERIPHERAL_CLOCK_HZ + (UART_FORWARD_BAUD_RATE / 2UL)) / \
+    ((BOARD_UART_PERIPHERAL_CLOCK_HZ + (UART_FORWARD_BAUD_RATE / 2UL)) / \
      UART_FORWARD_BAUD_RATE)
 #define UART_DMA_RX_BUFFER_MASK (UART_FORWARD_RX_BUFFER_SIZE - 1U)
 #define UART_DMA_TX_BUFFER_MASK (UART_FORWARD_TX_BUFFER_SIZE - 1U)
@@ -21,12 +21,6 @@
                 DMA_CFGR1_TEIE | DMA_CFGR1_CIRC))
 #define UART_DMA_TX_CONFIG \
     ((uint32_t)(DMA_CFGR1_DIR | DMA_CFGR1_MINC | DMA_CFGR1_PL_0))
-
-#if UART_FORWARD_PORT == UART_FORWARD_PORT_PA23
-#define UART_DMA_RX_IRQ_HANDLER DMA1_Channel6_IRQHandler
-#elif UART_FORWARD_PORT == UART_FORWARD_PORT_PB67
-#define UART_DMA_RX_IRQ_HANDLER DMA1_Channel5_IRQHandler
-#endif
 
 typedef struct
 {
@@ -87,45 +81,25 @@ static void uart2_dma_service_tx(const Uart2Dma *self);
 static void uart2_dma_start_tx(const Uart2Dma *self);
 static uint32_t uart2_dma_rx_produced(const Uart2Dma *self);
 
-#if UART_FORWARD_PORT == UART_FORWARD_PORT_PA23
+/* 外设、DMA 和中断与 GPIO 使用同一份板级路由。 */
 static const Uart2DmaConfig uart2_dma_config UART_DMA_FLASH = {
-    .usart = USART2,
-    .dma = DMA1,
-    .rx_dma = DMA1_Channel6,
-    .tx_dma = DMA1_Channel7,
-    .peripheral_clock_enable = &RCC->APB1PCENR,
-    .peripheral_reset = &RCC->APB1PRSTR,
-    .peripheral_clock_mask = RCC_USART2EN,
-    .peripheral_reset_mask = RCC_USART2RST,
-    .rx_irq = DMA1_Channel6_IRQn,
-    .rx_dma_global_flag = DMA_CGIF6,
-    .rx_dma_complete_flag = DMA_TCIF6,
-    .rx_dma_error_flag = DMA_TEIF6,
-    .tx_dma_global_flag = DMA_CGIF7,
-    .tx_dma_complete_flag = DMA_TCIF7,
-    .tx_dma_error_flag = DMA_TEIF7,
+    .usart = BOARD_UART_PERIPHERAL,
+    .dma = BOARD_UART_DMA,
+    .rx_dma = BOARD_UART_RX_DMA,
+    .tx_dma = BOARD_UART_TX_DMA,
+    .peripheral_clock_enable = BOARD_UART_CLOCK_REGISTER,
+    .peripheral_reset = BOARD_UART_RESET_REGISTER,
+    .peripheral_clock_mask = BOARD_UART_CLOCK_MASK,
+    .peripheral_reset_mask = BOARD_UART_RESET_MASK,
+    .rx_irq = BOARD_UART_RX_DMA_IRQ,
+    .rx_dma_global_flag = BOARD_UART_RX_DMA_GLOBAL_FLAG,
+    .rx_dma_complete_flag = BOARD_UART_RX_DMA_DONE_FLAG,
+    .rx_dma_error_flag = BOARD_UART_RX_DMA_ERROR_FLAG,
+    .tx_dma_global_flag = BOARD_UART_TX_DMA_GLOBAL_FLAG,
+    .tx_dma_complete_flag = BOARD_UART_TX_DMA_DONE_FLAG,
+    .tx_dma_error_flag = BOARD_UART_TX_DMA_ERROR_FLAG,
     .brr = (uint16_t)UART_DMA_BRR_VALUE
 };
-#elif UART_FORWARD_PORT == UART_FORWARD_PORT_PB67
-static const Uart2DmaConfig uart2_dma_config UART_DMA_FLASH = {
-    .usart = USART1,
-    .dma = DMA1,
-    .rx_dma = DMA1_Channel5,
-    .tx_dma = DMA1_Channel4,
-    .peripheral_clock_enable = &RCC->APB2PCENR,
-    .peripheral_reset = &RCC->APB2PRSTR,
-    .peripheral_clock_mask = RCC_USART1EN,
-    .peripheral_reset_mask = RCC_USART1RST,
-    .rx_irq = DMA1_Channel5_IRQn,
-    .rx_dma_global_flag = DMA_CGIF5,
-    .rx_dma_complete_flag = DMA_TCIF5,
-    .rx_dma_error_flag = DMA_TEIF5,
-    .tx_dma_global_flag = DMA_CGIF4,
-    .tx_dma_complete_flag = DMA_TCIF4,
-    .tx_dma_error_flag = DMA_TEIF4,
-    .brr = (uint16_t)UART_DMA_BRR_VALUE
-};
-#endif
 
 static Uart2DmaState uart2_dma_state UART_DMA_BUFFER_ALIGNMENT;
 
@@ -318,7 +292,7 @@ static void uart2_dma_configure(const Uart2Dma *const self)
 {
     const Uart2DmaConfig *const config = self->config;
 
-    RCC->AHBPCENR |= RCC_DMA1EN;
+    *BOARD_UART_DMA_CLOCK_REGISTER |= BOARD_UART_DMA_CLOCK_MASK;
     *config->peripheral_clock_enable |= config->peripheral_clock_mask;
     *config->peripheral_reset |= config->peripheral_reset_mask;
     *config->peripheral_reset &= ~config->peripheral_reset_mask;
@@ -480,10 +454,10 @@ static uint32_t uart2_dma_rx_produced(const Uart2Dma *const self)
             UART_DMA_RX_BUFFER_MASK);
 }
 
-void UART_DMA_RX_IRQ_HANDLER(void)
+void BOARD_UART_RX_DMA_IRQ_HANDLER(void)
     __attribute__((interrupt("WCH-Interrupt-fast")));
 
-void UART_DMA_RX_IRQ_HANDLER(void)
+void BOARD_UART_RX_DMA_IRQ_HANDLER(void)
 {
     const uint32_t flags = uart2_dma.config->dma->INTFR;
 
@@ -514,11 +488,11 @@ _Static_assert(UART_FORWARD_PARITY == 0U,
                "UART forwarding requires no parity");
 _Static_assert(UART_FORWARD_DATA_BITS == 8U,
                "UART forwarding requires eight data bits");
-_Static_assert((UART_FORWARD_PERIPHERAL_CLOCK_HZ %
+_Static_assert((BOARD_UART_PERIPHERAL_CLOCK_HZ %
                 UART_FORWARD_BAUD_RATE) == 0UL,
                "UART BRR must be an exact compile-time divisor");
 _Static_assert(UART_DMA_BRR_VALUE ==
-                   (UART_FORWARD_PERIPHERAL_CLOCK_HZ / UART_FORWARD_BAUD_RATE),
+                   (BOARD_UART_PERIPHERAL_CLOCK_HZ / UART_FORWARD_BAUD_RATE),
                "UART BRR must match the selected board clock exactly");
 _Static_assert((UART_FORWARD_RX_BUFFER_SIZE & UART_DMA_RX_BUFFER_MASK) == 0U,
                "UART RX buffer size must be a power of two");

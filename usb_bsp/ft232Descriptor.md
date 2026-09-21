@@ -1,4 +1,4 @@
-# FTDI JTAG USB 枚举接入
+# FTDI JTAG 与 CDC USB 接口
 
 `ft232Descriptor.c` 提供 FT2232 双接口和 CDC ACM 功能所需的常量描述符，`ft232Descriptor.h`
 提供长度、端点和 FTDI vendor request 常量。USB 驱动拥有 EP0 状态机和端点寄存器，
@@ -9,15 +9,17 @@
 - 保留 BL702 使用的 `VID:PID = 0403:6010` 和 `bcdDevice = 0500`，主机按
   FT2232D 兼容设备处理。
 - USB 产品名和只读 EEPROM 产品名均为 `Dual RS232-HS`。D2XX 会将双通道
-  公布为 `Dual RS232-HS A/B`，Gowin Programmer 因此能在重新打开时选中 A 通道，
-  不再依赖将名称截断为单通道 `RS232-HS` 的主机替换库。
+  公布为 `Dual RS232-HS A/B`，用于保持通道命名兼容。描述符设计不代表所有主机系统或
+  Programmer 版本均已验证，实测范围见[更新说明](../UPDATE_2026-09-21.md)。
 - interface 0 是通道 A/JTAG，Bulk IN/OUT 为 `0x81/0x02`。
-- interface 1 是通道 B/AUX，Bulk IN/OUT 为 `0x83/0x04`；板级 UART 引脚未指定，
-  当前只发布独立原始数据面，不在 USB 层擅自消费为 UART。
-- interface 2/3 由 IAD 组成 CDC ACM 控制/数据功能，通知 IN、Bulk OUT/IN 分别为
-  `0x85/0x06/0x87`。CDC 数据面通过字节流 ops 接到 USART2 DMA 转发服务。
-- 四个 FTDI Bulk 端点的 `wMaxPacketSize` 仍为 64。CDC 三个端点采用 16 字节，
-  配置描述符总长度为 121 字节，全部缓冲区仍位于 512 字节 USB PMA 内。
+- interface 1 是通道 B/AUX，Bulk IN/OUT 为 `0x83/0x04`，保留独立原始数据面；
+  当前 UART 转发使用 CDC，不接到 FTDI 通道 B。
+- UART 转发或 ACM 调试启用时，追加 interface 2/3，由 IAD 组成 CDC ACM 控制/数据功能，
+  通知 IN、Bulk OUT/IN 分别为 `0x85/0x06/0x87`。两项均关闭时不枚举 CDC。
+- CDC 正常用于板型选定的 USART DMA 转发；`JTAG_ACM_TRACE=ON` 时由 JTAG 日志独占，
+  CMake 同时关闭 UART 转发。
+- 四个 FTDI Bulk 端点的 `wMaxPacketSize` 为 64，CDC 三个端点采用 16 字节。
+  无 CDC 时配置描述符长 55 B，有 CDC 时长 121 B；端点缓冲区位于 512 B USB PMA 内。
 - `bcdUSB = 0x0210` 只用于 BOS/MS OS 2.0 发现，CH32 仍按 Full Speed 工作。
 
 ## EP0 的描述符回复
@@ -37,7 +39,7 @@
 
 没有发布 Device Qualifier；Full Speed-only 实现收到该请求时应 STALL。未知类型或索引也应 STALL。
 `SET_ADDRESS` 必须在状态阶段完成后应用地址；`SET_CONFIGURATION(1)` 成功后启用两对
-FTDI Bulk 端点并发布 CDC 的 NAK 端点，至此标准 USB 枚举完成。
+FTDI Bulk 端点；编译启用 CDC 时，同时初始化其 NAK 端点。
 
 Windows 读取 BOS 后会发设备到主机的 vendor request：
 
@@ -75,28 +77,43 @@ CDC 的 `GET_LINE_CODING` 固定返回 `115200 8N1`。`SET_LINE_CODING` 会完�
 data stage 并正常 ACK，但内容只进入 EP0 临时槽，不修改编译期 UART 配置；DTR/RTS 和
 SEND_BREAK 当前同样只完成控制传输。
 
-USART2 固定使用 PA2/PA3 和 DMA1 Channel7/6。UART RX/TX 各有 512 字节静态环形区，
-USB 层、UART 层与转发服务之间只通过 `ByteStreamPortOps` 交换连续片段。
+UART 路由来自 `userconfig.cmake`，经 `BoardConfig.h` 提供给驱动：
+
+| UART 模式 | 外设 | TX / RX | DMA1 RX / TX |
+| --- | --- | --- | --- |
+| `PB67` | USART1 | PB6 / PB7 | Channel5 / Channel4 |
+| `PA23` | USART2 | PA2 / PA3 | Channel6 / Channel7 |
+| `DISABLED` | 不编译 UART 转发 | 无 | 无 |
+
+UART RX/TX 各有 512 B 静态环形区，USB、UART 与转发服务之间只通过
+`ByteStreamPortOps` 交换连续片段。板型和功能开关详见[板级配置](../boardtype/README.md)。
 
 ## 64 字节包与 Manager 队列
 
-Manager 的 RX/TX 当前各为 2048 字节，正好容纳 32 个 64 字节 OUT 包，因此无需缩减。
-描述符中的 `wMaxPacketSize` 必须保持 64，它描述物理端点事务上限，与软件环形队列总深度无关。
+Manager 使用 **RX 4096 B、TX 1024 B** 静态缓冲。端点 `wMaxPacketSize=64`
+描述物理 USB 包上限，与软件队列总容量不同。普通 OUT 立即执行；匹配编程页头时
+按 BL702 策略收集，详见[JTAG 内核说明](../jtag_core/jtagManager.md)。
 
-Bulk OUT 的最多 64 字节有效载荷原样提交给 Manager RX。Bulk IN 每包先放两个 FTDI 状态字节，
-所以每个 64 字节 IN 包最多从 Manager TX 取 62 字节。Manager 没有回复时 EP1 保持 NAK，
-不会主动提交只有 `31 60` 的空状态包。Gowin WINUSB 的 MPSSE 同步读取不会像 libftdi 一样
-持续过滤空状态包；若空包抢在 `FA AA` 前完成，软件会把剥头后的零长度数组当成同步结果。
-因此只有 Manager 已经产生有效载荷时才提交 IN：
+Bulk OUT 最多 64 B 有效载荷原样交给 Manager。真实 Bulk IN 回包在前面添加两个
+FTDI 状态字节，因此每包最多承载 62 B Manager 回复：
 
 ```text
-31 60 [最多 62 字节 Manager 回复]
+31 60 [最多 62 B Manager 回复]
 ```
 
-TX 满时先发 IN 包再继续运行 Manager。RX 空间不足时不要重新使能 OUT 接收，保持 NAK，
-避免覆盖尚未执行的 MPSSE 字节。USB 层每个通道各有一个 64 字节静态 OUT 邮箱，JTAG
-USB/BSP 层另有一个 64 字节 MPSSE IN 拼包缓冲，均不在函数栈上。邮箱未消费时相应 OUT 端点保持 NAK；PMA 已接管 IN 数据后
-Manager TX 才允许出队。
+TX 跨环尾时借用两段数据拼成同一个 USB 包，不因环尾提前发送短包。没有 RX 事务且
+真实 TX 为空时，距最后真实 IN 提交超过 1 ms 后允许发送只有 `31 60` 的状态包。
+状态包不刷新该计时，因此这不是严格的“每 1 ms 一包”。编程批次收集、执行期间不提交
+新的 IN，已经提交给 PMA 的包保留原生命周期。
+
+USB 层每通道有一个 64 B 静态 OUT 邮箱，另有 64 B MPSSE IN 拼包区。邮箱未消费时
+OUT 保持 NAK；IN 数据交给 PMA 后才允许 Manager TX 出队。批次执行期间不因 TX 满
+而解锁拆批，容量不足会报告 `TX_OVERFLOW`，停止执行并等待主机 reset。
+
+通道 A 的 SIO reset/purge 清整个 MPSSE 内核与队列。USB reset/configuration 交接时先
+NAK OUT，由主循环清理旧状态后再恢复接收；SET_BITMODE 本身不隐式清空通道 A 内核。
+
+## 构建序列号
 
 序列号格式是 `CH32_FTDI_YYMMDDhhmmss`。每次执行 CMake 构建时都以 UTC
 时间生成新的 12 字符后缀，不读写 CMake cache。生成头文件作为

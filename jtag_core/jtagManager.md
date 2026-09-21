@@ -2,15 +2,15 @@
 
 本版以本地 `RV-Debugger-BL702` 的提交 `1b27d3f74dfc7cfb157e6560ca8a3e7d964b391a` 为基准，对照实际被 CMake 编译的 `firmware/app/usb2uartjtag/jtag_process.c`，以及 `main.c` 的 `usb_dc_ftdi_send_from_ringbuffer`、`usbd_ftdi.c` 的控制请求处理。没有使用 `jtag_process.c.gowin`。
 
-对应默认启用 `MPSSE_GOWIN_PROGRAM_TRANSFER_BATCH=1`、`MPSSE_PROCESS_PACKET_CONTIGUOUS=1`、`MPSSE_GOWIN_PROGRAM_DR32_COALESCE=1`，普通移位走 GPIO，不启用硬件 SPI。
+参考 BL702 源码中默认启用 `MPSSE_GOWIN_PROGRAM_TRANSFER_BATCH=1`、`MPSSE_PROCESS_PACKET_CONTIGUOUS=1`、`MPSSE_GOWIN_PROGRAM_DR32_COALESCE=1`。这些名称描述参考实现，不是本项目可选的 CMake 开关。本项目普通移位走 GPIO，不启用硬件 SPI；板型由 [userconfig.cmake 配置流程](../boardtype/README.md)选择。
 
 ## 状态和数据归属
 
-- `ftdiJtagService`：唯一的批次相位 IDLE/COLLECTING/READY/FAULT；负责 USB 邮箱与内核交接，不拥有页数据副本。
+- `ftdiJtagService`：唯一的批次相位 IDLE/COLLECTING/READY/FAULT/SEQUENCE_FAULT；负责 USB 邮箱与内核交接，不拥有页数据副本。
 - `jtagManager` / `jtagGowinFlash`：跨批次 MPSSE 相位、长时钟标志、IR pending、控制用 TAP、DR32 用途及唯一 4 字节暂存、本地等待完成类型、09后的准备标志及71的字序号。末拍和三拍进入序列各保存1字节，以原阶段字段区分待提交；JtagState仍为28字节。`dr32_instruction` 替代原 `program_active`，取 71/75/0；擦除地址输出后清零。控制 TAP 仅由 Gowin 内核修改，诊断 TAP 仅作观察，不参与 GPIO 决策。
 - `jtagRingBuffer`：唯一 RX 4096 B、TX 1024 B 数组及索引；RX 批次执行完清索引，从 0 开始下一批，TX 保持环形。没有动态内存。
 - `ft232Usbd`：64 B OUT 邮箱、64 B IN 拼包区、USB PMA 和端点状态，以及最后一次真实 IN 提交的计时。真实回包由环形队列借用一至两段直接复制进现有拼包区，不再增加 62 B 中间缓存。
-- `GPIO_Cfg`：CH32 寄存器和板级引脚；22PINOUT 为 TCK=PA6、TMS=PA7、TDI=PA5、TDO=PA4。
+- `boardtype/BoardGpio`：CH32 GPIO 执行；硬件映射只读取 `BoardConfig.h` 选择的板型头。22PINOUT 为 TCK=PA6、TMS=PA7、TDI=PA5、TDO=PA4。
 
 ## 收包和回包
 
@@ -39,7 +39,7 @@ CH32 USB 中断只发布事件，主循环才复位解析器。因此 reset/conf
 | TMS | TDI 取 data bit7，TMS 逐位从低位发；保留参考代码每拍两次 TCK_LOW 访问 |
 | 位长度 | 保留 BL702 长度字节加一的 1..256 拍行为，用 uint16_t 承载 |
 | 初始化命令 | `80/82/86` 消费两参数；`81/83` 回 `01/03`；`84/85/87/8A/8B/8C/8D/96/97` 只消费；未知命令回 `FA + opcode` |
-| IR 判断 | 恢复 master 的 Shift-IR 限制，`1B/7` 加单拍 TMS 拼成 IR；71 打开编程捕获，75 打开一次擦除地址捕获，DR 数据不会被误认成 IR |
+| IR 判断 | 仅在 Shift-IR 识别指令，`1B/7` 加单拍 TMS 拼成 IR；71 打开编程捕获，75 打开一次擦除地址捕获，DR 数据不会被误认成 IR |
 | DR32 | 仅在 Shift-DR 捕获 71 编程及 75 首个地址，支持 `11/13` MSB 与 `19/1B` LSB 的 24+7+1；LSB 字节反转后复用同一 GPIO 函数 |
 | 形态不匹配 | 未捕获时其它长度仍走普通路径；开始暂存后严格要求7+1尾及两拍/七拍返回Idle，允许无边沿的87，非法后缀报 SEQUENCE_FAULT 并等待 reset，不丢位继续 |
 | DR32提交 | 先收齐24+7+1及返回Idle命令，匹配的三拍进入Shift-DR也暂存，物理TAP在此之前保持Idle；随后连续调用三拍进入、DR32、两拍Update/Idle、定量等待，中间不再解析命令。每个DR32半周期保留volatile两次循环及NOP |
@@ -59,18 +59,10 @@ CH32 USB 中断只发布事件，主循环才复位解析器。因此 reset/conf
 
 ## 验证状态
 
-**最新：20:58，DR_TRANSACTION串号260921125322已通过64字实际读回、同一LED文件的openFPGALoader完整Flash烧录（CRC Success），以及独立reload后的USERCODE=63BD检查。** 用户已确认完全断电重上电后LED仍闪烁；Gowin GUI尚未重测。见[成功记录](../docs/gw1n9-flash-success-20260921.md)。以下保留此前失败及交付时的状态。
+2026-09-21，DR_TRANSACTION 固件 `CH32_FTDI_260921125322` 在 22PINOUT 接线、UART 和 ACM 调试关闭的配置下，通过单页 64 字实际读回、openFPGALoader 完整 Flash 烧录（CRC Success）及独立重新加载检查。用户确认完全断电重上电后 LED 仍闪烁，见[成功记录](../docs/gw1n9-flash-success-20260921.md)。
 
-2026-09-21：此前v3/v4及Python完整镜像实验仍失败；USB重建镜像和MCU抽样摘要均匹配，不能把GPIO执行日志当成Flash写入证明。历史记录见[现场诊断](../docs/gw1n9-live-debug-20260921.md)。
+该固件之前的 ATOMIC_COMMIT 使用相同缓冲、等待拍数和 GPIO 循环，单页仍失败；DR_TRANSACTION 进一步暂存三拍进入序列后通过。两轮擦除前缀都在单个 USB 包内，因此不能将现象简单归结为 USB 丢包或跨包间隔。
 
-同日MCU本地直驱版完成一次单页真实写读，64字零差异，擦除并reload后、写图样前Flash Lock已清零。准备1200拍、地址后32拍、数据字后24拍、擦除600000拍均在MCU内执行。详见[实测及候选版记录](../docs/gw1n9-direct-result-20260921.md)。
+匹配的 DR32 事务内已连续执行；准备结束到 IR15、字与字之间以及未匹配的命令形式仍可能有解析或 USB 间隙。没有仪器测得 FPGA 允许的具体最长间隙，不声称整个烧录过程等价于本地直驱。
 
-本次正常MPSSE候选版将这些等待移到已识别的指令转换处，覆盖OFL两拍和Gowin七拍返回形式，默认交付构建关闭ACM观察及UART转发。Gowin内核仍独占控制状态，未增加页缓存或第二份TAP状态；缓冲及收包策略不变。DR32和Run-Test函数的机器码与成功直驱版逐字节一致。
-
-20:37实测：上一版LOCAL_IDLE（串号260921122636）完整OFL烧录仍CRC FAIL；使用直驱形式的IR等待/两拍退出、同包擦除前缀和相同64字图样，也未清Flash Lock。USB执行屏障耗时338.0ms，说明新路径执行了长等待，但不证明Flash擦除成功。详见[本轮记录](../docs/gw1n9-normal-result-20260921.md)。
-
-20:43的ATOMIC_COMMIT版只进一步消除DR32物理尾拍到Update/Idle之间的解析间隙：该版stage=5时仅命令流控制TAP已到Exit1，物理DR32尚未开始；收到合法返回命令后才一起输出。该版物理进入Shift-DR仍提前执行。非法后缀进入明确序列故障，不静默丢位；USB reset清暂存，主机随后须发TAP reset。完成类型由idle_instruction维护，不另建TAP或页缓存。
-
-20:48实测：ATOMIC_COMMIT单页仍失败，擦除reload和写页reload后均39020，未取得有效读回，故未继续烧完整镜像。当前DR_TRANSACTION候选版进一步暂存三拍进入序列，直到DR32和返回后缀完整才输出整个事务。program_enter_tms的bit0恒为1，零表示无暂存，不另设影子TAP。匹配该进入形式后只接受11/19的三字节头、七位尾、单拍尾及两拍/七拍返回；非法形式进入序列故障并等USB reset。
-
-边界：准备结束到IR15以及字与字之间仍可能有解析/USB间隙；其它未匹配的进入形式不保证同样连续，不能声称整个烧录流程等价于直驱。等待拍数仍1200/600000/32/24，当前改变尚非已证明根因。已编译及反汇编核对，未跑本地测试。用户手动刷入后先验证单页，再验证完整FS和掉电启动。交付ACM关闭；另开TRACE仍会引入观察开销。详见[最新结果](../docs/gw1n9-atomic-result-20260921.md)。
+后续板级配置重构及 GUI 构建变体尚无新的完整板测记录，开启 TRACE 也需单独验证时序。最终修复固件的 Gowin GUI、Windows 和外置 Flash 路径尚未重测。早期失败与直驱实验按阶段保留在[排查归档](../docs/README.md)，不作为当前操作步骤。

@@ -1,5 +1,7 @@
 # GW1NR-9C 内置Flash单页成功与正常固件候选版
 
+> 历史调试记录：正文中的状态、路径与候选版名称均指记录当时。当前用法见[项目 README](../readme.md)，最终 Flash 修复结果见[成功记录](gw1n9-flash-success-20260921.md)。本地日志、工具和旧固件路径不作为发布附件。
+
 后续20:37：本文LOCAL_IDLE正常版上板仍失败；直接诊断单页成功结论不变。当前ATOMIC_COMMIT候选版及失败实测见[后续记录](gw1n9-normal-result-20260921.md)。
 
 2026-09-21 20:16，用户手动刷入直驱诊断固件后，当前9C板完成一次整片擦除、第一页写入和实际读回。固件比较64字零差异，主机取回64个原始数值再比较也为零差异。没有重复擦写或自动重试。
@@ -11,7 +13,7 @@
 - 命令：`python3 -B host_tools/gw1n9_direct/probe.py --serial CH32_FTDI_D60921120824 --run-one-page`。
 - 结果：`VERIFIED`，`run_count=1`，`words_compared=64`，`mismatch_count=0`，`host_mismatch_indices=[]`。
 - 总时基计数194875628，HCLK144MHz，约1.353秒，包含两次500ms reload等待。
-- 原始记录：[run-one-page.jsonl](../logs/gw1n9-direct-20260921-201619/run-one-page.jsonl)。同目录保存运行前检查、运行后取回、stderr和命令清单。
+- 原始记录：run-one-page.jsonl（本地归档：`logs/gw1n9-direct-20260921-201619/run-one-page.jsonl`）。同目录保存运行前检查、运行后取回、stderr和命令清单。
 
 | 阶段 | STATUS | USERCODE |
 | --- | --- | --- |
@@ -43,7 +45,7 @@ Flash Lock（bit17）在擦除并reload后已经清零。这不是由写入首�
 4. 已由本地窗口覆盖的后续纯Idle请求只消费，避免再次叠加主机等待。普通读回、其它TAP转换仍执行。
 5. 交付构建关闭ACM观察及UART转发。CMake排除日志、交付目录、host_tools及独立诊断入口，防止递归源文件收集混入备份或另一main。
 
-在相同GPIO循环的软件计时折算下，1200/32/24拍约为675/18/13.5微秒，600000拍约337.5毫秒；不是示波器测量。与成功直驱版的214字节DR32及156字节Run-Test机器码逐字节相同，见[比较记录](../logs/gw1n9-direct-20260921-201619/normal-gpio-code-comparison.json)。
+在相同GPIO循环的软件计时折算下，1200/32/24拍约为675/18/13.5微秒，600000拍约337.5毫秒；不是示波器测量。与成功直驱版的214字节DR32及156字节Run-Test机器码逐字节相同，见比较记录（本地归档：`logs/gw1n9-direct-20260921-201619/normal-gpio-code-comparison.json`）。
 
 编译通过：bin16100字节，RAM7668字节（含2048字节预留栈）。`git diff --check`通过。遵照用户要求，没有运行本地测试套件。保留原根目录ELF，交付使用独立构建目录产物。
 

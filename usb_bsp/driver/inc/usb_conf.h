@@ -1,7 +1,7 @@
 #ifndef CH32_FT232_USB_CONF_H
 #define CH32_FT232_USB_CONF_H
 
-#include "UartForwardConfig.h"
+#include "boardtype/BoardConfig.h"
 
 #if USB_CDC_ENABLED != 0U
 /* EP0、FT2232 A/B 四个端点以及 CDC ACM 三个端点占满 EP0~EP7。 */

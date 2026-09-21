@@ -1,6 +1,6 @@
 #include "ft232Usbd.h"
 
-#include "GPIO_Cfg.h"
+#include "boardtype/BoardGpio.h"
 #include "debug.h"
 #include "ft232Descriptor.h"
 #include "usb_lib.h"
@@ -26,14 +26,14 @@
 #define FT232_USBD_FLASH __attribute__((section(".rodata.usbd")))
 
 static const Ft232UsbdConfig ft232_usbd_config FT232_USBD_FLASH = {
-    .usb_clock_source = RCC_USBCLKSource_PLLCLK_Div3,
+    .usb_clock_source = BOARD_USB_CLOCK_SOURCE,
     .interrupt = {
         .NVIC_IRQChannel = USB_LP_CAN1_RX0_IRQn,
         .NVIC_IRQChannelPreemptionPriority = 1U,
         .NVIC_IRQChannelSubPriority = 0U,
         .NVIC_IRQChannelCmd = ENABLE
     },
-    .gpio = &GpioCfg0
+    .gpio = &BoardGpio0
 };
 
 static Ft232UsbdState ft232_usbd_state;
@@ -1367,14 +1367,14 @@ static void ft232_usbd_port_set(uint8_t connected)
     if (connected != 0U)
     {
         _SetCNTR((uint16_t)(_GetCNTR() & (uint16_t)~CNTR_PDWN));
-        GPIO_Cfg_UsbdPinsRelease(Ft232Usbd0.config->gpio);
+        BoardGpio_UsbdPinsRelease(Ft232Usbd0.config->gpio);
         EXTEN->EXTEN_CTR |= EXTEN_USBD_PU_EN;
     }
     else
     {
         EXTEN->EXTEN_CTR &= ~EXTEN_USBD_PU_EN;
         _SetCNTR((uint16_t)(_GetCNTR() | CNTR_PDWN));
-        GPIO_Cfg_UsbdPinsDriveLow(Ft232Usbd0.config->gpio);
+        BoardGpio_UsbdPinsDriveLow(Ft232Usbd0.config->gpio);
     }
 }
 
