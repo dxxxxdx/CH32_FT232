@@ -20,17 +20,9 @@
 5. USB 串口固定为 **115200 8N1**，RX/TX 都走 DMA，缓冲区各 512 字节。UART 可以在编译时二选一，也可以禁用
     但是谁不喜欢免费的uart呢，反正还有那么大ram
 
-    - `PA23`：PA2/PA3，默认；
-    - `PB67`：PB6/PB7。
-
-   ```bash
-   cmake -S . -B build -DUART_FORWARD_PORT_SELECT=PA23
-   cmake -S . -B build-pb67 -DUART_FORWARD_PORT_SELECT=PB67
-   ```
-
 6. LED自己配好就行，钩子都可以用
 
-7. 已经在 Gowin GW1NZ-1，还有GW1N-9 上试过，Windows 版 Gowin Programmer 可以直接烧 SRAM 和片内 Flash，`openFPGALoader` 也能正常识别 JTAG 链：
+7. 已经在 Gowin GW1NZ-1，还有GW1N-9 上试过，Windows 版 Gowin Programmer 可以直接烧 SRAM 和片内 Flash，`openFPGALoader` 也能正常烧：
 
    ```bash
    openFPGALoader -c ft2232 --detect
@@ -53,6 +45,8 @@
 15. 垃圾windows兼容性还是有问题，我怀疑我的测试环境卡驱动了，linux已经都可以正常烧录了
 
 17. 本项目编译的时候自带时间戳，固件更新可以wchisp直接usb烧录，不过这个应该就不用我教了，否则这点能力没有你确实不适合玩fpga
+
+18. 有5个star我会开源两个开发板的pcb文件
 
 > **最后提醒：**目前 JTAG 频率调节还不支持，上位机设置的速度会被直接忽略；MPSSE 指令也没有全部实现，只覆盖了现阶段实际用到的下载流程。换软件、换芯片或者玩冷门命令之前，先默认这里欠支持。
 
