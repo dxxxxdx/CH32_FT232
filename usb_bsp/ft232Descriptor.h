@@ -16,7 +16,7 @@ extern "C" {
 #define FTDI_USB_PRODUCT_ID            (0x6010U)
 #define FTDI_USB_DEVICE_RELEASE        (0x0500U)
 #define FTDI_USB_CONFIGURATION_VALUE   (0x01U)
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 /* Windows 依靠 EF/02/01 识别配置描述符中的 IAD，并把 CDC 控制/数据
  * 接口作为同一个功能枚举。纯 FT2232 形态保持原有的 00/00/00。
  */
@@ -30,14 +30,14 @@ extern "C" {
 #endif
 /* FT2232 始终保留 A/B 两个接口；UART 打开时再追加一组 CDC ACM 接口。 */
 #define FTDI_USB_INTERFACE_COUNT       (2U)
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 #define FTDI_USB_TOTAL_INTERFACE_COUNT (4U)
 #else
 #define FTDI_USB_TOTAL_INTERFACE_COUNT FTDI_USB_INTERFACE_COUNT
 #endif
 #define FTDI_USB_JTAG_INTERFACE_NUMBER (0x00U)
 #define FTDI_USB_AUX_INTERFACE_NUMBER  (0x01U)
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 #define FTDI_USB_CDC_CONTROL_INTERFACE_NUMBER (0x02U)
 #define FTDI_USB_CDC_DATA_INTERFACE_NUMBER    (0x03U)
 #endif
@@ -53,7 +53,7 @@ extern "C" {
 #define FTDI_USB_JTAG_OUT_EP           (0x02U)
 #define FTDI_USB_AUX_IN_EP             (0x83U)
 #define FTDI_USB_AUX_OUT_EP            (0x04U)
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 #define FTDI_USB_CDC_NOTIFICATION_IN_EP (0x85U)
 #define FTDI_USB_CDC_DATA_OUT_EP        (0x06U)
 #define FTDI_USB_CDC_DATA_IN_EP         (0x87U)
@@ -63,7 +63,7 @@ extern "C" {
 #define FTDI_USB_MODEM_STATUS          (0x31U)
 #define FTDI_USB_LINE_STATUS           (0x60U)
 
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 /* CDC 串口格式是编译期事实。SET_LINE_CODING 只完成 USB 控制传输，
  * 不允许主机改写后续 UART 初始化所使用的参数。
  */
@@ -84,7 +84,7 @@ extern "C" {
 #define FTDI_USB_DESC_BOS              (0x0FU)
 
 #define FTDI_USB_DEVICE_DESC_SIZE      (18U)
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 /* 原 FT2232 配置为 55 字节，追加 IAD 与 CDC ACM 功能共 66 字节。 */
 #define FTDI_USB_CONFIG_DESC_SIZE      (55U + 66U)
 #else

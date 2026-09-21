@@ -3,7 +3,7 @@
 
 #include "UartForwardConfig.h"
 
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 /* EP0、FT2232 A/B 四个端点以及 CDC ACM 三个端点占满 EP0~EP7。 */
 #define EP_NUM              (8U)
 #else
@@ -22,7 +22,7 @@
 #define ENDP2_RXADDR        (0x0100U)
 #define ENDP3_TXADDR        (0x0140U)
 #define ENDP4_RXADDR        (0x0180U)
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 #define ENDP5_TXADDR        (0x01C0U)
 #define ENDP6_RXADDR        (0x01D0U)
 #define ENDP7_TXADDR        (0x01E0U)

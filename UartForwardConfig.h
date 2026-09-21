@@ -1,7 +1,8 @@
 #ifndef CH32_FT232_UART_FORWARD_CONFIG_H
 #define CH32_FT232_UART_FORWARD_CONFIG_H
 
-#include "boardtype/20pinout.h"
+#include "boardtype/BoardConfig.h"
+#include "JtagTraceConfig.h"
 
 /* UART 转发共有关闭、PA2/PA3、PB6/PB7 三种编译期配置。关闭时不发布
  * CDC 接口，也不配置 UART GPIO、USART 和 DMA。
@@ -14,10 +15,10 @@
 #define UART_FORWARD_PORT UART_FORWARD_PORT_DISABLED
 #endif
 
-#if (BOARD_20PINOUT != 0U) && \
+#if (BOARD_CUSTOM_PINOUT != 0U) && \
     (UART_FORWARD_PORT != UART_FORWARD_PORT_DISABLED) && \
-    (UART_FORWARD_PORT != BOARD_20PINOUT_UART_PORT)
-#error "BOARD_20PINOUT UART forwarding requires PB6/PB7"
+    (UART_FORWARD_PORT != BOARD_UART_PORT)
+#error "Selected board UART forwarding requires PB6/PB7"
 #endif
 
 #if (UART_FORWARD_PORT != UART_FORWARD_PORT_PA23) && \
@@ -28,6 +29,12 @@
 
 #define UART_FORWARD_ENABLED \
     ((UART_FORWARD_PORT != UART_FORWARD_PORT_DISABLED) ? 1U : 0U)
+
+/* 诊断构建独占 CDC；UART 转发和日志不得同时成为同一端口的生产者。 */
+#define USB_CDC_ENABLED ((UART_FORWARD_ENABLED || JTAG_ACM_TRACE_ENABLED) ? 1U : 0U)
+#if JTAG_ACM_TRACE_ENABLED && UART_FORWARD_ENABLED
+#error "JTAG ACM trace requires UART forwarding disabled"
+#endif
 
 /* UART 与 CDC GET_LINE_CODING 共用这一份编译期事实，主机请求不能改写。 */
 #define UART_FORWARD_BAUD_RATE       (115200UL)

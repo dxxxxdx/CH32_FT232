@@ -2,16 +2,19 @@
 #include "GPIO_Cfg.h"
 
 #include "ch32v20x.h"
+#include "jtagTrace.h"
+#if JTAG_ACM_TRACE_ENABLED
 #include "SystemTimebase.h"
-#include <JtagGpioInterrupt.h>
+#endif
 
 #define JTAG_GPIO_FLASH __attribute__((section(".rodata.jtag_gpio")))
-/* UG290 的 GW1NZ-1 擦除要求连续 Run-Test/Idle 120 ms。
- * 留出余量取 180 ms，按 HCLK 时基计时，不能用假定 TCK 换算固定拍数。
+/* 保留 BL702 的连续时钟路径和 volatile 半周期循环，擦除拍数增加到
+ * 参考值 150000 的四倍，为 CH32 留出时间余量；不改变每拍速度。
+ * 当前 144 MHz / -Og 的旧 ELF 每拍约 55 条指令，600000 拍按一条
+ * 指令一周期估算约 229 ms；这不是引脚实测，编译变化后需重新核对。
  */
-#define JTAG_GOWIN_ERASE_TIME_MS      (180U)
-/* UG290 7.2 的 T-process 擦除步骤 4：ConfigEnable 前连续 Idle 至少 500 us。 */
-#define JTAG_GOWIN_PREPARE_TIME_US    (600U)
+#define JTAG_GOWIN_ERASE_CLOCKS (600000U)
+#define JTAG_GOWIN_EDGE_DELAY_LOOPS (2U)
 
 /* CH32V20x 每个 GPIO 配置占四位；模式值来自 GPIOx_CFGLR/CFGHR。 */
 #define GPIO_CFG_MODE_OUTPUT_PP_50MHZ (0x03UL)
@@ -53,22 +56,22 @@ struct GpioCfg
 
 static uint8_t jtag_gpio_shift_lsb(const JtagIo *self,
                                    uint8_t data,
-                                   uint8_t bits);
+                                   uint16_t bits);
 static uint8_t jtag_gpio_shift_msb(const JtagIo *self,
                                    uint8_t data,
-                                   uint8_t bits);
+                                   uint16_t bits);
 static uint8_t jtag_gpio_shift_tms(const JtagIo *self,
                                    uint8_t data,
-                                   uint8_t bits);
+                                   uint16_t bits);
 static void jtag_gpio_shift_msb_output(const JtagIo *self,
                                        uint8_t data,
-                                       uint8_t bits);
+                                       uint16_t bits);
 static void jtag_gpio_clock_program_dr32(const JtagIo *self,
                                          const uint8_t word[4],
                                          uint8_t tail);
 static void jtag_gpio_clock_erase(const JtagIo *self);
-static void jtag_gpio_clock_prepare(const JtagIo *self);
-static void jtag_gpio_clock_idle(const JtagIo *self, uint32_t ticks);
+static void jtag_gpio_clock_program_idle(const JtagIo *self, uint32_t clocks);
+static void jtag_gpio_clock_run_test(const JtagIo *self, uint32_t clocks);
 static inline __attribute__((always_inline)) void jtag_gpio_edge_delay(void);
 static inline void gpio_cfg_pin_write(const GpioCfgPin *pin, uint8_t value);
 static inline void gpio_cfg_pin_set(const GpioCfgPin *pin);
@@ -101,7 +104,7 @@ static const JtagIoOps jtag_gpio_ops JTAG_GPIO_FLASH = {
     .shift_msb_output = jtag_gpio_shift_msb_output,
     .clock_program_dr32 = jtag_gpio_clock_program_dr32,
     .clock_erase = jtag_gpio_clock_erase,
-    .clock_prepare = jtag_gpio_clock_prepare
+    .clock_program_idle = jtag_gpio_clock_program_idle
 };
 
 const GpioCfg GpioCfg0 GPIO_CFG_FLASH = {
@@ -228,12 +231,12 @@ static void gpio_cfg_pin_mode(const GpioCfgPin *const pin, uint32_t mode)
 
 static uint8_t jtag_gpio_shift_lsb(const JtagIo *const self,
                                    uint8_t data,
-                                   uint8_t bits)
+                                   uint16_t bits)
 {
     const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
     uint8_t reply = 0U;
 
-    for (uint8_t bit = 0U; bit < bits; bit++)
+    for (uint16_t bit = 0U; bit < bits; bit++)
     {
         gpio_cfg_pin_reset(pins->tck);
         gpio_cfg_pin_write(pins->tdi, (uint8_t)(data & 0x01U));
@@ -251,12 +254,12 @@ static uint8_t jtag_gpio_shift_lsb(const JtagIo *const self,
 
 static uint8_t jtag_gpio_shift_msb(const JtagIo *const self,
                                    uint8_t data,
-                                   uint8_t bits)
+                                   uint16_t bits)
 {
     const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
     uint8_t reply = 0U;
 
-    for (uint8_t bit = 0U; bit < bits; bit++)
+    for (uint16_t bit = 0U; bit < bits; bit++)
     {
         gpio_cfg_pin_reset(pins->tck);
         gpio_cfg_pin_write(pins->tdi, (uint8_t)(data & 0x80U));
@@ -274,11 +277,11 @@ static uint8_t jtag_gpio_shift_msb(const JtagIo *const self,
 
 static void jtag_gpio_shift_msb_output(const JtagIo *const self,
                                        uint8_t data,
-                                       uint8_t bits)
+                                       uint16_t bits)
 {
     const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
 
-    for (uint8_t bit = 0U; bit < bits; bit++)
+    for (uint16_t bit = 0U; bit < bits; bit++)
     {
         gpio_cfg_pin_reset(pins->tck);
         gpio_cfg_pin_write(pins->tdi, (uint8_t)(data & 0x80U));
@@ -290,14 +293,15 @@ static void jtag_gpio_shift_msb_output(const JtagIo *const self,
 
 static uint8_t jtag_gpio_shift_tms(const JtagIo *const self,
                                    uint8_t data,
-                                   uint8_t bits)
+                                   uint16_t bits)
 {
     const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
     uint8_t reply = 0U;
 
     gpio_cfg_pin_write(pins->tdi, (uint8_t)(data & 0x80U));
-    for (uint8_t bit = 0U; bit < bits; bit++)
+    for (uint16_t bit = 0U; bit < bits; bit++)
     {
+        gpio_cfg_pin_reset(pins->tck);
         gpio_cfg_pin_reset(pins->tck);
         gpio_cfg_pin_write(pins->tms, (uint8_t)(data & 0x01U));
         data = (uint8_t)(data >> 1U);
@@ -366,48 +370,52 @@ static void jtag_gpio_clock_program_dr32(const JtagIo *const self,
 
 static void jtag_gpio_clock_erase(const JtagIo *const self)
 {
-    const uint32_t ticks = (SystemCoreClock / 1000U) * JTAG_GOWIN_ERASE_TIME_MS;
-
-    jtag_gpio_clock_idle(self, ticks);
+    JtagTrace_EraseBegin(&JtagTrace0, JTAG_GOWIN_ERASE_CLOCKS);
+#if JTAG_ACM_TRACE_ENABLED
+    const uint32_t started = SystemTimebase_Now(&SystemTimebase0);
+#endif
+    jtag_gpio_clock_run_test(self, JTAG_GOWIN_ERASE_CLOCKS);
+#if JTAG_ACM_TRACE_ENABLED
+    const uint32_t elapsed = SystemTimebase_Now(&SystemTimebase0) - started;
+    JtagTrace_EraseDone(&JtagTrace0, JTAG_GOWIN_ERASE_CLOCKS, elapsed);
+#endif
 }
 
-static void jtag_gpio_clock_prepare(const JtagIo *const self)
+static void jtag_gpio_clock_program_idle(const JtagIo *const self, uint32_t clocks)
 {
-    const uint32_t ticks =
-        (SystemCoreClock / 1000000U) * JTAG_GOWIN_PREPARE_TIME_US;
-    const uint32_t interrupt_token = JtagGpioInterrupt_Save();
-
-    /* 仅 600 us 窗口屏蔽可屏蔽中断，避免 UART ISR 插入空档；退出恢复
-     * 进入时的使能位，不把外层原本关闭的中断盲目打开。DMA 仍可运行。
-     */
-    jtag_gpio_clock_idle(self, ticks);
-    JtagGpioInterrupt_Restore(interrupt_token);
+#if JTAG_ACM_TRACE_ENABLED
+    const uint32_t started = SystemTimebase_Now(&SystemTimebase0);
+#endif
+    jtag_gpio_clock_run_test(self, clocks);
+#if JTAG_ACM_TRACE_ENABLED
+    const uint32_t elapsed = SystemTimebase_Now(&SystemTimebase0) - started;
+    JtagTrace_ProgramIdle(&JtagTrace0, clocks, elapsed);
+#endif
 }
 
-static void jtag_gpio_clock_idle(const JtagIo *const self, uint32_t ticks)
+static void jtag_gpio_clock_run_test(const JtagIo *const self, uint32_t clocks)
 {
     const JtagGpioPins *const pins = (const JtagGpioPins *)self->context;
-    uint32_t started_at;
 
-    /* 两种窗口共用 HCLK 计时和 GPIO 边沿；这里不碰时基寄存器或中断状态，
-     * 180 ms 擦除的中断语义保持原样，不受主机声明的 MPSSE 档位影响。
+    /* 擦除和每字编程等待共用同一连续边沿循环；主循环已屏蔽中断。
+     * TMS 恒低，循环内无 USB、命令解析、逐字节返回或诊断观察。
      */
     gpio_cfg_pin_reset(pins->tms);
     gpio_cfg_pin_reset(pins->tdi);
-    gpio_cfg_pin_reset(pins->tck);
-    started_at = SystemTimebase_Now(&SystemTimebase0);
-    do
+    for (uint32_t bit = 0U; bit < clocks; bit++)
     {
         gpio_cfg_pin_reset(pins->tck);
         jtag_gpio_edge_delay();
         gpio_cfg_pin_set(pins->tck);
         jtag_gpio_edge_delay();
     }
-    while ((uint32_t)(SystemTimebase_Now(&SystemTimebase0) - started_at) < ticks);
     gpio_cfg_pin_reset(pins->tck);
 }
 
 static inline __attribute__((always_inline)) void jtag_gpio_edge_delay(void)
 {
-    __asm volatile ("nop\n\tnop" ::: "memory");
+    for (volatile uint32_t delay = 0U; delay < JTAG_GOWIN_EDGE_DELAY_LOOPS; delay++)
+    {
+        __asm volatile ("nop" ::: "memory");
+    }
 }

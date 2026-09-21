@@ -21,8 +21,8 @@ JtagRxPacketResult JTAGManager_RxWritePacket(const JTAGManager *const self,
         return JTAG_RX_PACKET_BACKPRESSURE;
     }
 
-    /* USB批次并不等于Gowin页。收包调度由service负责，跨批次的MPSSE
-     * 相位和DR32暂存仍只属于manager，满队列不覆盖未执行的字节。
+    /* 收包调度由 service 按 BL702 页头规则负责；跨批次的 MPSSE
+     * 相位和 DR32 暂存只属于 manager，满队列不覆盖未执行的字节。
      */
     rx->ops->write(rx, data, length);
     return JTAG_RX_PACKET_ACCEPTED;
@@ -39,9 +39,10 @@ uint16_t JTAGManager_RxFree(const JTAGManager *const self)
 }
 
 uint16_t JTAGManager_TxPeek(const JTAGManager *const self,
+                            uint16_t offset,
                             const uint8_t **const data)
 {
-    return self->config->tx->ops->peek(self->config->tx, data);
+    return self->config->tx->ops->peek(self->config->tx, offset, data);
 }
 
 void JTAGManager_TxConsume(const JTAGManager *const self, uint16_t length)

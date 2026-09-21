@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+#include "boardtype/BoardConfig.h"
 #include "UartForwardConfig.h"
 #include "jtagIo.h"
 
@@ -31,13 +32,13 @@ typedef struct
     }
 
 /* TCK/TDI/TMS 必须位于同一端口，clock_program_dr32 才能用一次
- * OUTDR 写保证边沿连续。20pinout 的整组映射来自板级配置头。
+ * OUTDR 写保证边沿连续。整组映射来自板级配置头。
  */
-#if BOARD_20PINOUT != 0U
-#define JTAG_TCK_PIN_CFG BOARD_20PINOUT_JTAG_TCK_CFG
-#define JTAG_TDI_PIN_CFG BOARD_20PINOUT_JTAG_TDI_CFG
-#define JTAG_TDO_PIN_CFG BOARD_20PINOUT_JTAG_TDO_CFG
-#define JTAG_TMS_PIN_CFG BOARD_20PINOUT_JTAG_TMS_CFG
+#if BOARD_CUSTOM_PINOUT != 0U
+#define JTAG_TCK_PIN_CFG BOARD_JTAG_TCK_CFG
+#define JTAG_TDI_PIN_CFG BOARD_JTAG_TDI_CFG
+#define JTAG_TDO_PIN_CFG BOARD_JTAG_TDO_CFG
+#define JTAG_TMS_PIN_CFG BOARD_JTAG_TMS_CFG
 #else
 #define JTAG_TCK_PIN_CFG GPIO_CFG_PIN(GPIOA, RCC_IOPAEN, 4U)
 #define JTAG_TDI_PIN_CFG GPIO_CFG_PIN(GPIOA, RCC_IOPAEN, 5U)

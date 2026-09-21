@@ -1,23 +1,31 @@
 #include "ftdiJtagService.h"
+#include "jtagTrace.h"
 
-#define FTDI_JTAG_CLOCK_BUDGET (JTAG_MANAGER_RX_BUFFER_SIZE * 8U)
-#define FTDI_JTAG_RX_GAP_MS (2U)
+/* 对齐 BL702 的 collecting/ready/received 生命周期，只保存一个相位。 */
+typedef enum
+{
+    FTDI_JTAG_RX_IDLE = 0U,
+    FTDI_JTAG_RX_COLLECTING,
+    FTDI_JTAG_RX_READY,
+    FTDI_JTAG_RX_FAULT,
+    FTDI_JTAG_RX_SEQUENCE_FAULT
+} FtdiJtagRxPhase;
 
 typedef enum
 {
     FTDI_JTAG_PUMP_IDLE = 0,
     FTDI_JTAG_PUMP_PROGRESS,
+    FTDI_JTAG_PUMP_BATCH_FULL,
     FTDI_JTAG_PUMP_WAIT
 } FtdiJtagPumpResult;
 
 static FtdiJtagServiceResult ftdi_jtag_handle_events(const FtdiJtagService *self);
 static FtdiJtagPumpResult ftdi_jtag_pump_port_rx(const FtdiJtagService *self);
 static FtdiJtagPumpResult ftdi_jtag_pump_port_tx(const FtdiJtagService *self);
-static FtdiJtagServiceResult ftdi_jtag_map_manager_result(JtagServiceResult result);
-static uint8_t ftdi_jtag_batch_ready(const FtdiJtagService *self);
+static uint8_t ftdi_jtag_has_page_header(const uint8_t *data, uint16_t length);
+static FtdiJtagServiceResult ftdi_jtag_service_locked(const FtdiJtagService *self);
 
-FTDI_JTAG_SERVICE_DEFINE(ftdi_jtag_service, MpssePort0,
-                         JTAGManager0, FTDI_JTAG_CLOCK_BUDGET);
+FTDI_JTAG_SERVICE_DEFINE(ftdi_jtag_service, MpssePort0, JTAGManager0);
 
 void FtdiJtagService0_Init(void)
 {
@@ -33,6 +41,7 @@ void FtdiJtagService0_Poll(void)
     if (result >= FTDI_JTAG_SERVICE_PORT_RX_LENGTH_FAULT)
     {
         ftdi_jtag_service.state->sticky_fault = (uint8_t)result;
+        JtagTrace_Fault(&JtagTrace0, (uint8_t)result);
     }
 
     switch (result)
@@ -41,11 +50,16 @@ void FtdiJtagService0_Poll(void)
     case FTDI_JTAG_SERVICE_PROGRESS:
     case FTDI_JTAG_SERVICE_WAIT_CONFIGURATION:
     case FTDI_JTAG_SERVICE_BACKPRESSURE:
-    case FTDI_JTAG_SERVICE_MPSSE_FAULT:
+    case FTDI_JTAG_SERVICE_TX_OVERFLOW:
+    case FTDI_JTAG_SERVICE_SEQUENCE_FAULT:
         /* 外部 MPSSE/transfer 错误保持明确状态，等待主机 reset 重新同步。 */
         break;
     case FTDI_JTAG_SERVICE_PORT_RX_LENGTH_FAULT:
     case FTDI_JTAG_SERVICE_PORT_RX_OVERWRITE_FAULT:
+#if JTAG_ACM_TRACE_ENABLED
+        /* 诊断构建保留故障且停止本轮服务，让主循环有机会输出故障日志。 */
+        break;
+#endif
     default:
         /* 64 字节数据 port 不可能合法地产生这两种结果。 */
         __builtin_trap();
@@ -69,21 +83,26 @@ void FtdiJtagService_Init(const FtdiJtagService *const self)
     self->state->seen_host_tx_purge = events.host_tx_purge;
     self->state->last_result = FTDI_JTAG_SERVICE_IDLE;
     self->state->sticky_fault = FTDI_JTAG_SERVICE_IDLE;
-    self->state->rx_last_packet_at = 0U;
-    self->state->rx_batch_ready = 0U;
+    self->state->rx_phase = FTDI_JTAG_RX_IDLE;
     self->config->port->ops->enable(self->config->port);
 }
 
 FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
 {
-    FtdiJtagServiceResult result;
-    FtdiJtagPumpResult pump_result;
-    JtagServiceResult manager_result;
-    uint8_t irq_token;
-    uint8_t progressed = 0U;
-    uint8_t waiting = 0U;
+    const uint8_t irq_token =
+        self->config->port->ops->interrupt_lock(self->config->port);
+    const FtdiJtagServiceResult result = ftdi_jtag_service_locked(self);
 
-    result = ftdi_jtag_handle_events(self);
+    self->config->port->ops->interrupt_unlock(self->config->port, irq_token);
+    return result;
+}
+
+static FtdiJtagServiceResult ftdi_jtag_service_locked(const FtdiJtagService *const self)
+{
+    FtdiJtagServiceResult result = ftdi_jtag_handle_events(self);
+    FtdiJtagPumpResult rx_result;
+    FtdiJtagPumpResult tx_result;
+
     if (result != FTDI_JTAG_SERVICE_IDLE)
     {
         return result;
@@ -92,94 +111,69 @@ FtdiJtagServiceResult FtdiJtagService_Service(const FtdiJtagService *const self)
     {
         return FTDI_JTAG_SERVICE_WAIT_CONFIGURATION;
     }
-
-    /* 先发送上一轮已经生成的回复。 */
-    pump_result = ftdi_jtag_pump_port_tx(self);
-    if (pump_result == FTDI_JTAG_PUMP_PROGRESS)
+    if (self->state->rx_phase == FTDI_JTAG_RX_FAULT)
     {
-        progressed = 1U;
+        return FTDI_JTAG_SERVICE_TX_OVERFLOW;
     }
-    else if (pump_result == FTDI_JTAG_PUMP_WAIT)
+    if (self->state->rx_phase == FTDI_JTAG_RX_SEQUENCE_FAULT)
     {
-        waiting = 1U;
-    }
-    pump_result = ftdi_jtag_pump_port_rx(self);
-    if (pump_result == FTDI_JTAG_PUMP_PROGRESS)
-    {
-        progressed = 1U;
-    }
-    else if (pump_result == FTDI_JTAG_PUMP_WAIT)
-    {
-        waiting = 1U;
+        return FTDI_JTAG_SERVICE_SEQUENCE_FAULT;
     }
 
-    if (ftdi_jtag_batch_ready(self) != 0U)
+    /* BL702 收到 OUT 后先执行，received 为真时连真实回复也不向 IN 提交。
+     * 锁覆盖事件检查、邮箱搬运、整批 GPIO 和发送决策，避免 reset/新 OUT
+     * 在判断与提交之间插入。收集等待时每次只搬一个包，立即恢复中断。
+     */
+    rx_result = ftdi_jtag_pump_port_rx(self);
+    if (self->state->rx_phase == FTDI_JTAG_RX_COLLECTING)
     {
-        /* 先收批次再连续执行，执行期间不搬入下一批。保存全局IRQ状态，
-         * 防止USB和UART中断插入页内；只有TX背压允许提前让出以发送回复。
-         * 锁内重新检查reset/purge，不能执行收包时已经取消的字节。
+        return (rx_result == FTDI_JTAG_PUMP_PROGRESS)
+                   ? FTDI_JTAG_SERVICE_PROGRESS : FTDI_JTAG_SERVICE_IDLE;
+    }
+    if (self->state->rx_phase == FTDI_JTAG_RX_READY)
+    {
+#if JTAG_ACM_TRACE_ENABLED
+        const uint16_t batch_length = JTAGManager_RxUsed(self->config->jtag);
+#endif
+        const JtagServiceResult manager_result = JTAGManager_Service(self->config->jtag);
+        JtagTrace_Batch(&JtagTrace0, batch_length, (uint8_t)manager_result);
+
+        if (manager_result == JTAG_SERVICE_TX_OVERFLOW)
+        {
+            self->state->rx_phase = FTDI_JTAG_RX_FAULT;
+            return FTDI_JTAG_SERVICE_TX_OVERFLOW;
+        }
+        if (manager_result == JTAG_SERVICE_SEQUENCE_FAULT)
+        {
+            self->state->rx_phase = FTDI_JTAG_RX_SEQUENCE_FAULT;
+            return FTDI_JTAG_SERVICE_SEQUENCE_FAULT;
+        }
+        /* 包内没有预算让出。最后一个邮箱直到整个批次执行完才释放并重开
+         * EP2；中途缺命令后缀只保留解析相位，与 BL702 的跨包状态一致。
          */
-        irq_token = self->config->port->ops->interrupt_lock(self->config->port);
-        result = ftdi_jtag_handle_events(self);
-        if (result != FTDI_JTAG_SERVICE_IDLE)
+        self->state->rx_phase = FTDI_JTAG_RX_IDLE;
+        if (rx_result == FTDI_JTAG_PUMP_BATCH_FULL)
         {
-            self->config->port->ops->interrupt_unlock(self->config->port,
-                                                       irq_token);
-            return result;
+            /* 与 BL702 容量分支一样，触发执行的下一包尚未并入当前批次。
+             * 保留这个 USB 邮箱，下一轮从新批次接收它，不能当旧包丢掉。
+             */
+            return FTDI_JTAG_SERVICE_PROGRESS;
         }
-
-        manager_result = JTAGManager_Service(self->config->jtag,
-                                             self->config->clock_budget);
-        self->config->port->ops->interrupt_unlock(self->config->port, irq_token);
-        if (JTAGManager_RxUsed(self->config->jtag) == 0U)
-        {
-            self->state->rx_batch_ready = 0U;
-        }
-        result = ftdi_jtag_map_manager_result(manager_result);
-        if (result == FTDI_JTAG_SERVICE_MPSSE_FAULT)
-        {
-            return result;
-        }
-        if (result == FTDI_JTAG_SERVICE_PROGRESS)
-        {
-            progressed = 1U;
-        }
+        self->config->port->ops->rx_consume(self->config->port);
     }
 
-    /* OUT 和 Manager 都推进后再次检查真实回复。只有 31 60 的兼容状态包
-     * 由 USB 层在 latency 到期后管理；JTAG 层不能把它混入
-     * 解析器 TX 队列。
-     */
-    pump_result = ftdi_jtag_pump_port_tx(self);
-    if (pump_result == FTDI_JTAG_PUMP_PROGRESS)
+    tx_result = ftdi_jtag_pump_port_tx(self);
+    if (tx_result == FTDI_JTAG_PUMP_IDLE)
     {
-        progressed = 1U;
+        /* 只有无接收事务且真实回复队列为空，才进入 BL702 的空状态包路径。 */
+        self->config->port->ops->service(self->config->port);
     }
-    else if (pump_result == FTDI_JTAG_PUMP_WAIT)
-    {
-        waiting = 1U;
-    }
-    pump_result = ftdi_jtag_pump_port_rx(self);
-    if (pump_result == FTDI_JTAG_PUMP_PROGRESS)
-    {
-        progressed = 1U;
-    }
-    else if (pump_result == FTDI_JTAG_PUMP_WAIT)
-    {
-        waiting = 1U;
-    }
-
-    /* 真实 TX 已经获得两次优先发送机会，最后才允许 USB 层补空闲状态包。
-     * JTAG 核只调用 port service，不读取 USB 时钟、端点或 bit mode。
-     */
-    self->config->port->ops->service(self->config->port);
-
-    if (progressed != 0U)
+    if ((rx_result == FTDI_JTAG_PUMP_PROGRESS) || (tx_result == FTDI_JTAG_PUMP_PROGRESS))
     {
         return FTDI_JTAG_SERVICE_PROGRESS;
     }
-    return (waiting != 0U) ? FTDI_JTAG_SERVICE_BACKPRESSURE
-                           : FTDI_JTAG_SERVICE_IDLE;
+    return (tx_result == FTDI_JTAG_PUMP_WAIT)
+               ? FTDI_JTAG_SERVICE_BACKPRESSURE : FTDI_JTAG_SERVICE_IDLE;
 }
 
 static FtdiJtagServiceResult ftdi_jtag_handle_events(const FtdiJtagService *const self)
@@ -200,11 +194,19 @@ static FtdiJtagServiceResult ftdi_jtag_handle_events(const FtdiJtagService *cons
         __builtin_trap();
     }
 
+    /* BL702 对通道 A 的 SIO_RESET、PURGE_RX、PURGE_TX 均执行
+     * jtag_mpsse_reset，清 RX/TX、半条命令与 DR32 暂存。
+     */
     if ((events.bus_reset != self->state->seen_bus_reset) ||
-        (events.sio_reset != self->state->seen_sio_reset))
+        (events.sio_reset != self->state->seen_sio_reset) ||
+        (events.host_rx_purge != self->state->seen_host_rx_purge) ||
+        (events.host_tx_purge != self->state->seen_host_tx_purge))
     {
         JTAGManager_Reset(self->config->jtag);
-        self->state->rx_batch_ready = 0U;
+        JtagTrace_Reset(&JtagTrace0, ((uint32_t)events.bus_reset << 24U) |
+                        ((uint32_t)events.sio_reset << 16U) |
+                        ((uint32_t)events.host_rx_purge << 8U) | events.host_tx_purge);
+        self->state->rx_phase = FTDI_JTAG_RX_IDLE;
         self->config->port->ops->rx_consume(self->config->port);
         self->state->seen_bus_reset = events.bus_reset;
         self->state->seen_sio_reset = events.sio_reset;
@@ -212,124 +214,116 @@ static FtdiJtagServiceResult ftdi_jtag_handle_events(const FtdiJtagService *cons
         self->state->seen_host_tx_purge = events.host_tx_purge;
         return FTDI_JTAG_SERVICE_PROGRESS;
     }
-
-    if (events.host_rx_purge != self->state->seen_host_rx_purge)
-    {
-        /* 主机 RX 对应设备 TX。 */
-        JTAGManager_TxPurge(self->config->jtag);
-        self->state->seen_host_rx_purge = events.host_rx_purge;
-    }
-    if (events.host_tx_purge != self->state->seen_host_tx_purge)
-    {
-        /* 主机 TX 对应设备 RX，连同半条 MPSSE 命令一起清除。 */
-        JTAGManager_RxPurge(self->config->jtag);
-        self->state->rx_batch_ready = 0U;
-        self->config->port->ops->rx_consume(self->config->port);
-        self->state->seen_host_tx_purge = events.host_tx_purge;
-    }
     return FTDI_JTAG_SERVICE_IDLE;
 }
 
 static FtdiJtagPumpResult ftdi_jtag_pump_port_rx(const FtdiJtagService *const self)
 {
     const uint8_t *data;
-    uint16_t length;
-    JtagRxPacketResult rx_result;
+    const uint16_t length = self->config->port->ops->rx_peek(self->config->port, &data);
 
-    if (self->state->rx_batch_ready != 0U)
+    if (data == (const uint8_t *)0)
     {
         return FTDI_JTAG_PUMP_IDLE;
     }
-    length = self->config->port->ops->rx_peek(self->config->port, &data);
+    if ((self->state->rx_phase == FTDI_JTAG_RX_COLLECTING) &&
+        (JTAGManager_RxFree(self->config->jtag) < MPSSE_PORT_RX_PACKET_SIZE))
+    {
+        /* BL702 在下一次 OUT 回调、读新包之前检查 offset >4096-64。
+         * 因此恰好 4096 字节也要等下一个 OUT（包括 ZLP）才执行满批次。
+         */
+        self->state->rx_phase = FTDI_JTAG_RX_READY;
+        return FTDI_JTAG_PUMP_BATCH_FULL;
+    }
     if (length == 0U)
     {
+        JtagTrace_Rx(&JtagTrace0, length);
+        /* 与 BL702 一样，ZLP 不作为编程页完成标记；没有 2 ms 超时收尾。 */
+        self->config->port->ops->rx_consume(self->config->port);
         return FTDI_JTAG_PUMP_IDLE;
     }
-    rx_result = JTAGManager_RxWritePacket(
-        self->config->jtag, data, length);
-    if (rx_result == JTAG_RX_PACKET_BACKPRESSURE)
+    if (JTAGManager_RxWritePacket(self->config->jtag, data, length) != JTAG_RX_PACKET_ACCEPTED)
     {
-        return FTDI_JTAG_PUMP_WAIT;
+        /* 容量不足的批次在上面先执行，不能把新包写入仍未执行的区域。 */
+        __builtin_trap();
     }
-    if (rx_result == JTAG_RX_PACKET_ACCEPTED)
+    JtagTrace_Rx(&JtagTrace0, length);
+    if (self->state->rx_phase == FTDI_JTAG_RX_IDLE)
     {
-        self->state->rx_last_packet_at =
-            self->config->port->ops->time_now(self->config->port);
-        if ((length < MPSSE_PORT_RX_PACKET_SIZE) ||
-            (JTAGManager_RxFree(self->config->jtag) < MPSSE_PORT_RX_PACKET_SIZE))
-        {
-            self->state->rx_batch_ready = 1U;
-        }
+        self->state->rx_phase = (ftdi_jtag_has_page_header(data, length) != 0U)
+                                   ? FTDI_JTAG_RX_COLLECTING : FTDI_JTAG_RX_READY;
+    }
+    if (length < MPSSE_PORT_RX_PACKET_SIZE)
+    {
+        self->state->rx_phase = FTDI_JTAG_RX_READY;
+    }
+    if (self->state->rx_phase == FTDI_JTAG_RX_COLLECTING)
+    {
         self->config->port->ops->rx_consume(self->config->port);
-        return FTDI_JTAG_PUMP_PROGRESS;
     }
-    /* EP2 已保证 1..64 字节且邮箱数据有效，命中表示内部边界契约损坏。 */
-    __builtin_trap();
+    return FTDI_JTAG_PUMP_PROGRESS;
 }
 
-static uint8_t ftdi_jtag_batch_ready(const FtdiJtagService *const self)
+static uint8_t ftdi_jtag_has_page_header(const uint8_t *const data, uint16_t length)
 {
-    if (JTAGManager_RxUsed(self->config->jtag) == 0U)
+    static const uint8_t header[] FTDI_JTAG_SERVICE_FLASH = {
+        0x4BU, 0x03U, 0x03U, 0x1BU, 0x06U, 0x71U
+    };
+    const uint16_t limit = (length < 32U) ? length : 32U;
+
+    for (uint16_t pos = 0U; pos + sizeof(header) <= limit; pos++)
     {
-        return 0U;
+        uint8_t index = 0U;
+
+        while ((index < sizeof(header)) && (data[pos + index] == header[index]))
+        {
+            index++;
+        }
+        if (index == sizeof(header))
+        {
+            return 1U;
+        }
     }
-    if ((self->state->rx_batch_ready == 0U) &&
-        (self->config->port->ops->time_elapsed(self->config->port,
-            self->state->rx_last_packet_at, FTDI_JTAG_RX_GAP_MS) != 0U))
-    {
-        /* 主机可能在64B整数倍处等待读回复，不保证发送短包或ZLP。 */
-        self->state->rx_batch_ready = 1U;
-    }
-    return self->state->rx_batch_ready;
+    return 0U;
 }
 
 static FtdiJtagPumpResult ftdi_jtag_pump_port_tx(const FtdiJtagService *const self)
 {
-    const uint8_t *payload;
-    const uint16_t available = JTAGManager_TxPeek(self->config->jtag, &payload);
-    uint16_t payload_length;
-    MpssePortResult port_result;
+    const uint8_t *head;
+    const uint8_t *tail = (const uint8_t *)0;
+    uint16_t head_length = JTAGManager_TxPeek(self->config->jtag, 0U, &head);
+    uint16_t tail_length = 0U;
+    MpssePortResult result;
 
-    if (available == 0U)
+    if (head_length == 0U)
     {
         return FTDI_JTAG_PUMP_IDLE;
     }
-
-    payload_length = (available < MPSSE_PORT_TX_PACKET_SIZE)
-                         ? available : MPSSE_PORT_TX_PACKET_SIZE;
-    port_result = self->config->port->ops->tx_write(
-        self->config->port, payload, payload_length);
-    if (port_result == MPSSE_PORT_OK)
+    if (head_length > MPSSE_PORT_TX_PACKET_SIZE)
     {
-        if (payload_length != 0U)
+        head_length = MPSSE_PORT_TX_PACKET_SIZE;
+    }
+    else if (head_length < MPSSE_PORT_TX_PACKET_SIZE)
+    {
+        /* BL702 一包读取最多 62 字节，跨环尾也不提前制造 USB 短包。
+         * 两段都只借用，USB 成功复制到 PMA 后才一起消费，无第二份 TX 缓存。
+         */
+        tail_length = JTAGManager_TxPeek(self->config->jtag, head_length, &tail);
+        if (tail_length > MPSSE_PORT_TX_PACKET_SIZE - head_length)
         {
-            JTAGManager_TxConsume(self->config->jtag, payload_length);
+            tail_length = (uint16_t)(MPSSE_PORT_TX_PACKET_SIZE - head_length);
         }
+    }
+    result = self->config->port->ops->tx_write(
+        self->config->port, head, head_length, tail, tail_length);
+    if (result == MPSSE_PORT_OK)
+    {
+        JTAGManager_TxConsume(self->config->jtag, (uint16_t)(head_length + tail_length));
         return FTDI_JTAG_PUMP_PROGRESS;
     }
-    if ((port_result == MPSSE_PORT_TX_BUSY) ||
-        (port_result == MPSSE_PORT_NOT_CONFIGURED))
+    if ((result == MPSSE_PORT_TX_BUSY) || (result == MPSSE_PORT_NOT_CONFIGURED))
     {
         return FTDI_JTAG_PUMP_WAIT;
     }
-
-    /* payload 来自内部 RB 且固定限制为 1..62 字节，其余结果是内部契约破坏。 */
     __builtin_trap();
-}
-
-static FtdiJtagServiceResult ftdi_jtag_map_manager_result(JtagServiceResult result)
-{
-    switch (result)
-    {
-    case JTAG_SERVICE_IDLE:
-    case JTAG_SERVICE_WAIT_RX:
-    case JTAG_SERVICE_WAIT_TX:
-        return FTDI_JTAG_SERVICE_IDLE;
-    case JTAG_SERVICE_BUDGET_REACHED:
-        return FTDI_JTAG_SERVICE_PROGRESS;
-    case JTAG_SERVICE_INVALID_ARGUMENT:
-        return FTDI_JTAG_SERVICE_MPSSE_FAULT;
-    default:
-        __builtin_trap();
-    }
 }

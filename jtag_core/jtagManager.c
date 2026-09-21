@@ -2,6 +2,10 @@
 
 #include "Hook.h"
 #include "jtagGowinFlash.h"
+#include "jtagTrace.h"
+#if JTAG_ACM_TRACE_ENABLED
+#include "SystemTimebase.h"
+#endif
 
 /* 命令集合与普通 GPIO 时序来源：BL702 firmware/app/usb2uartjtag/jtag_process.c。
  * 这里仅承接已经去掉 USB 层的 MPSSE 字节流，不增加新的命令语义。
@@ -13,42 +17,37 @@
 #define MPSSE_BAD_COMMAND (0xFAU)
 /* 单次 service 的短期调度状态，长期解析状态全部保留在 self->state->mpsse。 */
 typedef struct {
-    uint32_t clocks_left;
     uint16_t input_left;
-    uint8_t stopped;
+    uint8_t suppress_gpio;
     uint8_t toggle_hook_fired;
-    JtagServiceResult result;
 } JtagServiceWork;
 
 static void jtag_process_command(const JTAGManager *const self, JtagServiceWork *const work);
 static void jtag_process_arguments(const JTAGManager *const self, JtagServiceWork *const work);
 static void jtag_process_shift(const JTAGManager *const self, JtagServiceWork *const work);
-static uint8_t jtag_flush_program_exit(const JTAGManager *self, JtagServiceWork *work);
-static void jtag_join_program_exit(const JTAGManager *self, JtagServiceWork *work,
-                                   uint8_t bits);
+static void jtag_commit_dr32(const JTAGManager *self, uint8_t exit_data);
 static void jtag_shift_consumed(const JTAGManager *const self);
-static void jtag_stop(JtagServiceWork *const work, JtagServiceResult result);
+static uint8_t jtag_require_tx(const JTAGManager *self, uint16_t length);
 static void jtag_toggle_begin(JtagServiceWork *work);
 static uint8_t jtag_rx_take(const JTAGManager *const self, JtagServiceWork *const work);
 static void jtag_tx_put(const JTAGManager *const self, uint8_t value);
 
 JTAG_MANAGER_DEFINE(JTAGManager0, JtagIo0);
 
-JtagServiceResult JTAGManager_Service(const JTAGManager *const self, uint32_t clock_budget)
+JtagServiceResult JTAGManager_Service(const JTAGManager *const self)
 {
     JtagServiceWork work = {
-        .clocks_left = clock_budget,
         .input_left = self->config->rx->ops->used(self->config->rx),
-        .stopped = 0U,
-        .toggle_hook_fired = 0U,
-        .result = JTAG_SERVICE_IDLE
+        .suppress_gpio = 0U,
+        .toggle_hook_fired = 0U
     };
 
-    if (self->state->mpsse.phase == JTAG_MPSSE_FAULT) {
-        return JTAG_SERVICE_INVALID_ARGUMENT;
-    }
-
-    while ((work.input_left != 0U) && (work.stopped == 0U)) {
+    /* BL702 的 suppress_gpio 在一次 jtag_process 入口清零，goto 继续处理
+     * 同一批次时不会清零。这里保留该作用域，避免移植时暗改它的行为。
+     */
+    while ((work.input_left != 0U) &&
+           (self->state->mpsse.phase != JTAG_MPSSE_FAULT) &&
+           (self->state->mpsse.phase != JTAG_MPSSE_SEQUENCE_FAULT)) {
         switch (self->state->mpsse.phase) {
         case JTAG_MPSSE_COMMAND:
             jtag_process_command(self, &work);
@@ -59,24 +58,33 @@ JtagServiceResult JTAGManager_Service(const JTAGManager *const self, uint32_t cl
         case JTAG_MPSSE_SHIFT:
             jtag_process_shift(self, &work);
             break;
-        case JTAG_MPSSE_FAULT:
         default:
             __builtin_trap();
         }
     }
 
-    if (work.stopped != 0U) {
-        return work.result;
+    if (self->state->mpsse.phase == JTAG_MPSSE_FAULT) {
+        return JTAG_SERVICE_TX_OVERFLOW;
     }
-    return ((self->state->mpsse.phase == JTAG_MPSSE_COMMAND) &&
-            (self->state->gowin.program_exit_data == 0U))
+    if (self->state->mpsse.phase == JTAG_MPSSE_SEQUENCE_FAULT) {
+        return JTAG_SERVICE_SEQUENCE_FAULT;
+    }
+    /* BL702 每批从 RX[0] 开始；只复位空队列，跨包命令和 DR32 暂存保留。 */
+    self->config->rx->ops->clear(self->config->rx);
+    return (self->state->mpsse.phase == JTAG_MPSSE_COMMAND)
                ? JTAG_SERVICE_IDLE : JTAG_SERVICE_WAIT_RX;
 }
 
-static void jtag_stop(JtagServiceWork *const work, JtagServiceResult result)
+static uint8_t jtag_require_tx(const JTAGManager *const self, uint16_t length)
 {
-    work->stopped = 1U;
-    work->result = result;
+    if (self->config->tx->ops->free(self->config->tx) < length) {
+        /* BL702 忽略 Ring_Buffer_Write_Byte 的结果。CH32 保留明确故障，
+         * 不覆盖旧回复，也不通过页内解锁/回包把一个执行批次拆开。
+         */
+        self->state->mpsse.phase = JTAG_MPSSE_FAULT;
+        return 0U;
+    }
+    return 1U;
 }
 
 static void jtag_toggle_begin(JtagServiceWork *const work)
@@ -104,20 +112,10 @@ static void jtag_process_command(const JTAGManager *const self, JtagServiceWork 
 {
     const uint8_t opcode = self->config->rx->ops->front(self->config->rx);
 
-    /* 输出屏障、读回、其它移位和未知命令之前，先履行已接收的完整退出。
-     * 只有0x4B允许继续收齐参数/数据，等待期间物理TAP仍在Exit1。
-     */
-    if ((self->state->gowin.program_exit_data != 0U) && (opcode != 0x4BU) &&
-        (jtag_flush_program_exit(self, work) == 0U)) {
+    if (JtagGowinFlash_BeginCommand(self, opcode) == 0U) {
+        self->state->mpsse.phase = JTAG_MPSSE_SEQUENCE_FAULT;
         return;
     }
-
-    if (JtagGowinFlash_ProgramCommandValid(self, opcode) == 0U) {
-        self->state->mpsse.phase = JTAG_MPSSE_FAULT;
-        jtag_stop(work, JTAG_SERVICE_INVALID_ARGUMENT);
-        return;
-    }
-
     switch (opcode) {
     case 0x80U:
     case 0x82U:
@@ -147,8 +145,7 @@ static void jtag_process_command(const JTAGManager *const self, JtagServiceWork 
 
     case 0x81U:
     case 0x83U:
-        if (self->config->tx->ops->free(self->config->tx) == 0U) {
-            jtag_stop(work, JTAG_SERVICE_WAIT_TX);
+        if (jtag_require_tx(self, 1U) == 0U) {
             return;
         }
         /* BL702 返回固定状态，不在移植时替换为另一种 GPIO 读取语义。 */
@@ -170,8 +167,7 @@ static void jtag_process_command(const JTAGManager *const self, JtagServiceWork 
 
     default:
         /* 整个错误回复有空间后才消费 opcode，重入时不会重复发送 FA。 */
-        if (self->config->tx->ops->free(self->config->tx) < 2U) {
-            jtag_stop(work, JTAG_SERVICE_WAIT_TX);
+        if (jtag_require_tx(self, 2U) == 0U) {
             return;
         }
         jtag_tx_put(self, MPSSE_BAD_COMMAND);
@@ -195,17 +191,9 @@ static void jtag_process_arguments(const JTAGManager *const self, JtagServiceWor
     }
 
     if ((self->state->mpsse.opcode & MPSSE_BIT_MODE) != 0U) {
-        /* 普通位移位最多 8 位。FTDI 文档通常把 TMS 限为 7 位，但 Gowin
-         * Programmer 用 4B 07 7F 合并“7 个复位时钟 + 1 个 Idle 时钟”；
-         * BL702 原实现也按 8 位执行，因此这里接受参数 0..7。
-         * 更大的外部长度仍停在错误状态，不能让一字节数据产生任意时钟。
+        /* BL702 按长度字节加一执行，完整保留 1..256 拍；GPIO 使用
+         * uint16_t 位数，避免参数 FF 加一后被截成零。
          */
-        const uint8_t maximum = 7U;
-        if (self->state->mpsse.arguments[0] > maximum) {
-            self->state->mpsse.phase = JTAG_MPSSE_FAULT;
-            jtag_stop(work, JTAG_SERVICE_INVALID_ARGUMENT);
-            return;
-        }
         self->state->mpsse.remaining = (uint32_t)self->state->mpsse.arguments[0] + 1U;
         self->state->mpsse.phase = JTAG_MPSSE_SHIFT;
     } else if (self->state->mpsse.argument_count == 2U) {
@@ -214,168 +202,135 @@ static void jtag_process_arguments(const JTAGManager *const self, JtagServiceWor
              ((uint32_t)self->state->mpsse.arguments[1] << 8U)) + 1U;
         self->state->gowin.long_clock_candidate =
             JtagGowinFlash_IsEraseWaitCandidate(
-                self, self->state->mpsse.opcode,
+                self->state->mpsse.opcode,
                 self->state->mpsse.remaining);
         self->state->gowin.long_clock_suppress = 0U;
         self->state->mpsse.phase = JTAG_MPSSE_SHIFT;
     }
 }
 
-static uint8_t jtag_flush_program_exit(const JTAGManager *const self,
-                                        JtagServiceWork *const work)
-{
-    uint8_t data;
-
-    if (work->clocks_left < 2U) {
-        jtag_stop(work, JTAG_SERVICE_BUDGET_REACHED);
-        return 0U;
-    }
-    data = JtagGowinFlash_TakeProgramExit(self);
-    jtag_toggle_begin(work);
-    (void)self->config->io->ops->shift_tms(self->config->io, data, 2U);
-    work->clocks_left -= 2U;
-    return 1U;
-}
-
-static void jtag_join_program_exit(const JTAGManager *const self,
-                                    JtagServiceWork *const work, uint8_t bits)
-{
-    const uint8_t head_bits = (bits > 5U) ? 5U : bits;
-    const uint8_t tail_bits = (uint8_t)(bits - head_bits);
-    uint8_t data;
-    uint8_t pending;
-    uint8_t head;
-
-    if (work->clocks_left < (uint32_t)bits + 2U) {
-        jtag_stop(work, JTAG_SERVICE_BUDGET_REACHED);
-        return;
-    }
-    data = jtag_rx_take(self, work);
-    pending = JtagGowinFlash_TakeProgramExit(self);
-    JtagGowinFlash_ObserveInstruction(self, data, bits);
-    /* TMS数据bit7同时承载TDI，不能用8拍0x81表示两拍退出+六拍Idle。
-     * 第一条最多7拍，保证退出和首Idle在同一GPIO调用内；余拍原样补齐。
-     */
-    head = (uint8_t)((pending & 0x81U) |
-                    ((data & (uint8_t)((1U << head_bits) - 1U)) << 2U));
-    jtag_toggle_begin(work);
-    (void)self->config->io->ops->shift_tms(self->config->io, head,
-                                            (uint8_t)(head_bits + 2U));
-    if (tail_bits != 0U) {
-        const uint8_t tail = (uint8_t)((data & 0x80U) |
-            ((data >> head_bits) & (uint8_t)((1U << tail_bits) - 1U)));
-        (void)self->config->io->ops->shift_tms(self->config->io, tail, tail_bits);
-    }
-    work->clocks_left -= (uint32_t)bits + 2U;
-    jtag_shift_consumed(self);
-}
-
 static void jtag_process_shift(const JTAGManager *const self, JtagServiceWork *const work)
 {
-    const uint8_t bits = ((self->state->mpsse.opcode & MPSSE_BIT_MODE) != 0U)
-                             ? (uint8_t)self->state->mpsse.remaining : 8U;
-    const uint8_t byte_mode =
-        ((self->state->mpsse.opcode & MPSSE_BIT_MODE) == 0U) ? 1U : 0U;
-    uint8_t program_dr32_tail;
-    uint8_t suppress_gpio;
-    JtagGowinLongClockAction long_clock_action;
+    const uint8_t opcode = self->state->mpsse.opcode;
+    const uint8_t byte_mode = ((opcode & MPSSE_BIT_MODE) == 0U) ? 1U : 0U;
+    const uint16_t bits = (byte_mode != 0U)
+                              ? 8U : (uint16_t)self->state->mpsse.remaining;
     uint8_t reply = 0U;
     uint8_t data;
 
-    data = self->config->rx->ops->front(self->config->rx);
-    if (self->state->gowin.program_exit_data != 0U) {
-        if (JtagGowinFlash_CanJoinProgramExit(self, data) != 0U) {
-            jtag_join_program_exit(self, work, bits);
-            return;
-        }
-        if (jtag_flush_program_exit(self, work) == 0U) {
-            return;
-        }
-    }
-
-    /* 当前命令的可暂停条件在取走其数据和操作GPIO之前检查；此前非匹配
-     * 路径可能已按原顺序履行上一条完整退出命令，不影响本条回复归属。
-     */
-    if (((self->state->mpsse.opcode & MPSSE_READ_TDO) != 0U) &&
-        (self->config->tx->ops->free(self->config->tx) == 0U)) {
-        jtag_stop(work, JTAG_SERVICE_WAIT_TX);
+    if (((opcode & MPSSE_READ_TDO) != 0U) && (jtag_require_tx(self, 1U) == 0U)) {
         return;
     }
-
-    if (JtagGowinFlash_ProgramDataValid(self, data, bits) == 0U) {
-        self->state->mpsse.phase = JTAG_MPSSE_FAULT;
-        jtag_stop(work, JTAG_SERVICE_INVALID_ARGUMENT);
-        return;
-    }
-    if (JtagGowinFlash_DeferProgramExit(self, data, bits) != 0U) {
-        (void)jtag_rx_take(self, work);
-        jtag_shift_consumed(self);
-        return;
-    }
-    long_clock_action = (byte_mode != 0U)
-                            ? JtagGowinFlash_LongClockByte(self, data)
-                            : JtagGowinFlash_EraseTmsClock(self, data, bits);
-    if (long_clock_action != JTAG_GOWIN_LONG_CLOCK_PASSTHROUGH) {
-        if (long_clock_action == JTAG_GOWIN_LONG_CLOCK_ERASE) {
-            jtag_toggle_begin(work);
-            self->config->io->ops->clock_erase(self->config->io);
-        }
-        (void)jtag_rx_take(self, work);
-        jtag_shift_consumed(self);
-        return;
-    }
-
-    program_dr32_tail = JtagGowinFlash_IsProgramDr32Tail(self, bits);
-    if (work->clocks_left < ((program_dr32_tail != 0U) ? 32U : bits)) {
-        jtag_stop(work, JTAG_SERVICE_BUDGET_REACHED);
-        return;
-    }
-
     data = jtag_rx_take(self, work);
-    suppress_gpio = JtagGowinFlash_CaptureProgramData(self, data, bits);
-    JtagGowinFlash_ObserveInstruction(self, data, bits);
+    const uint32_t prepare_clocks = JtagGowinFlash_PrepareClocks(self, data, bits);
+    if (prepare_clocks != 0U) {
+        jtag_toggle_begin(work);
+        self->config->io->ops->clock_program_idle(self->config->io, prepare_clocks);
+    }
+    if (JtagGowinFlash_SuppressIdle(self, data, bits) != 0U) {
+        jtag_shift_consumed(self);
+        return;
+    }
+    const JtagGowinDr32Action capture =
+        JtagGowinFlash_CaptureProgramData(self, data, bits);
+    if (capture == JTAG_GOWIN_DR32_INVALID) {
+        self->state->mpsse.phase = JTAG_MPSSE_SEQUENCE_FAULT;
+        return;
+    }
+    if (capture == JTAG_GOWIN_DR32_ENTER_CAPTURED ||
+        capture == JTAG_GOWIN_DR32_TAIL_CAPTURED) {
+        /* 只推进命令流的控制TAP；物理进入、数据和提交等完整后缀。
+         * 87及USB包边界可以出现在这里，物理TAP保持原来的Idle。
+         */
+        JtagGowinFlash_ObserveInstruction(self, data, bits);
+        jtag_shift_consumed(self);
+        return;
+    }
+    if (capture == JTAG_GOWIN_DR32_CAPTURED) {
+        /* 已暂存的 LSB 也必须跳过普通 GPIO；1B/7 是 DR 数据而不是 IR。
+         * 只保留原 MSB 路径的批次抑制行为，不让擦除地址污染后续命令。
+         */
+        if (((opcode & MPSSE_LSB_FIRST) == 0U) &&
+            (self->state->gowin.dr32_instruction == 0x71U)) {
+            work->suppress_gpio = 1U;
+        }
+        jtag_shift_consumed(self);
+        return;
+    }
+    if (byte_mode != 0U) {
+        const JtagGowinLongClockAction action = JtagGowinFlash_LongClockByte(self, data);
 
-    if (program_dr32_tail != 0U) {
-        jtag_toggle_begin(work);
-        self->config->io->ops->clock_program_dr32(
-            self->config->io, self->state->gowin.program_word, data);
-        self->state->gowin.program_word_stage = 0U;
-        work->clocks_left -= 32U;
-    } else if (suppress_gpio != 0U) {
-        /* 24+7+1 位要到最后一条 TMS 命令才一次性产生全部 32 个时钟。 */
-    } else {
-        jtag_toggle_begin(work);
-        if ((self->state->mpsse.opcode & MPSSE_WRITE_TMS) != 0U) {
-            reply = self->config->io->ops->shift_tms(
-                self->config->io, data, bits);
-        } else if ((self->state->mpsse.opcode & MPSSE_LSB_FIRST) != 0U) {
-            reply = self->config->io->ops->shift_lsb(
-                self->config->io, data, bits);
-        } else if ((self->state->mpsse.opcode & MPSSE_BIT_MODE) != 0U) {
-            /* BL702 的 MSB 位命令只有 0x13/0x17，仅输出，不采样 TDO。 */
-            self->config->io->ops->shift_msb_output(
-                self->config->io, data, bits);
-        } else {
-            reply = self->config->io->ops->shift_msb(
-                self->config->io, data, bits);
+        if (action != JTAG_GOWIN_LONG_CLOCK_PASSTHROUGH) {
+            if (action == JTAG_GOWIN_LONG_CLOCK_ERASE) {
+                jtag_toggle_begin(work);
+                self->config->io->ops->clock_erase(self->config->io);
+            }
+            jtag_shift_consumed(self);
+            return;
         }
     }
 
-    if ((self->state->mpsse.opcode & MPSSE_READ_TDO) != 0U) {
+    /* 先推进命令流控制状态；COMMIT已经确认完整的DR32及返回后缀。 */
+    JtagGowinFlash_ObserveInstruction(self, data, bits);
+    if (capture == JTAG_GOWIN_DR32_COMMIT) {
+        jtag_toggle_begin(work);
+        jtag_commit_dr32(self, data);
+        JtagGowinFlash_ProgramWordDone(self);
+    } else if ((opcode & MPSSE_WRITE_TMS) != 0U) {
+        jtag_toggle_begin(work);
+        reply = self->config->io->ops->shift_tms(self->config->io, data, bits);
+        JtagTrace_Shift(&JtagTrace0, JTAG_TRACE_TMS, data, bits, reply);
+    } else if ((opcode & MPSSE_LSB_FIRST) != 0U) {
+        jtag_toggle_begin(work);
+        reply = self->config->io->ops->shift_lsb(self->config->io, data, bits);
+        JtagTrace_Shift(&JtagTrace0, JTAG_TRACE_LSB, data, bits, reply);
+    } else if (work->suppress_gpio == 0U) {
+        jtag_toggle_begin(work);
+        if (byte_mode != 0U) {
+            reply = self->config->io->ops->shift_msb(self->config->io, data, bits);
+            JtagTrace_Shift(&JtagTrace0, JTAG_TRACE_MSB, data, bits, reply);
+        } else {
+            self->config->io->ops->shift_msb_output(self->config->io, data, bits);
+            JtagTrace_Shift(&JtagTrace0, JTAG_TRACE_MSB_OUT, data, bits, 0U);
+        }
+    }
+    if ((opcode & MPSSE_READ_TDO) != 0U) {
         jtag_tx_put(self, reply);
     }
-    if ((program_dr32_tail == 0U) && (suppress_gpio == 0U)) {
-        work->clocks_left -= bits;
-    }
-    /* Observe 先推进的是软件 TAP；必须等上面的 TMS 已实际输出，才能
-     * 在 NOOP 的 Update-IR -> Idle 之后产生准备时钟，不能提前到 Shift-IR。
-     */
-    if (((self->state->mpsse.opcode & MPSSE_WRITE_TMS) != 0U) &&
-        (JtagGowinFlash_TakePrepare(self) != 0U)) {
-        jtag_toggle_begin(work);
-        self->config->io->ops->clock_prepare(self->config->io);
-    }
     jtag_shift_consumed(self);
+}
+
+static void jtag_commit_dr32(const JTAGManager *const self, uint8_t exit_data)
+{
+    const JtagIo *const io = self->config->io;
+    const uint32_t idle_clocks = JtagGowinFlash_PendingIdleClocks(self);
+    const uint8_t tail = self->state->gowin.program_word_tail;
+    const uint8_t enter_data = self->state->gowin.program_enter_tms;
+    if (enter_data != 0U) {
+        const uint8_t enter_reply = io->ops->shift_tms(io, enter_data, 3U);
+        JtagTrace_Shift(&JtagTrace0, JTAG_TRACE_TMS, enter_data, 3U, enter_reply);
+        (void)enter_reply;
+    }
+#if JTAG_ACM_TRACE_ENABLED
+    const uint32_t started = SystemTimebase_Now(&SystemTimebase0);
+#endif
+    /* 数据已齐，不再取RX、解析命令或推进状态机。七拍返回里的额外
+     * Idle并入本地窗口；只保留两拍Update/Idle，再立即开始等待。
+     * 本次交付关闭TRACE，进入、DR32、退出、等待之间没有观察器开销。
+     */
+    io->ops->clock_program_dr32(io, self->state->gowin.program_word, tail);
+#if JTAG_ACM_TRACE_ENABLED
+    JtagTrace_Program(&JtagTrace0, self->state->gowin.program_word, tail,
+                      SystemTimebase_Now(&SystemTimebase0) - started);
+#endif
+    const uint8_t reply = io->ops->shift_tms(io, exit_data, 2U);
+    JtagTrace_Shift(&JtagTrace0, JTAG_TRACE_TMS, exit_data, 2U, reply);
+    (void)reply;
+    if (idle_clocks == 0U) {
+        io->ops->clock_erase(io);
+    } else {
+        io->ops->clock_program_idle(io, idle_clocks);
+    }
 }
 
 static void jtag_shift_consumed(const JTAGManager *const self)

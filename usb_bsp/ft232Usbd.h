@@ -37,7 +37,7 @@ typedef struct
     uint8_t bit_mode;
 } Ft232UsbdChannelState;
 
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 typedef enum
 {
     FT232_USBD_CDC_FAULT_NONE = 0,
@@ -55,6 +55,7 @@ typedef struct
     volatile uint8_t in_consumed;
     volatile uint8_t data_enabled;
     volatile uint8_t fault;
+    volatile uint8_t control_line_state;
 } Ft232UsbdCdcState;
 #endif
 
@@ -73,12 +74,11 @@ typedef struct
     volatile uint8_t host_rx_purge_event;
     volatile uint8_t host_tx_purge_event;
     volatile uint8_t fault;
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
     Ft232UsbdCdcState cdc;
 #endif
-    uint32_t mpsse_idle_started_at;
-    volatile uint8_t mpsse_idle_status_pending;
-    volatile uint8_t mpsse_idle_status_queued;
+    uint32_t mpsse_last_data_at;
+    uint8_t mpsse_idle_elapsed;
 } Ft232UsbdState;
 
 _Static_assert(sizeof(Ft232UsbdState) <= 256U,
@@ -118,23 +118,23 @@ void Ft232Usbd_InterruptInit(const Ft232Usbd *self);
 
 /* GPIO/JTAG 就绪后才打开 bulk 数据面。枚举和 FTDI 控制请求不依赖此开关。 */
 void Ft232Usbd_DataEnable(const Ft232Usbd *self);
-/* 进入 MPSSE 及执行 0x86 等无数据回复命令后，latency 到期时
- * 补 FTDI 状态包结束主机空读。新 OUT 到达时，USB 层会撤回
- * 尚未发送的空包，保证它不会抢在真实 MPSSE 回复前面。
+/* 仅在无接收事务、无真实 TX 时调用。对齐 BL702：真实回复后超过
+ * 1 ms 可回 31 60；空包本身不重置计时，已提交的 IN 包不因 OUT 撤回。
  */
 void Ft232Usbd_MpsseService(const Ft232Usbd *self);
 uint8_t Ft232Usbd_IsConfigured(const Ft232Usbd *self);
 void Ft232Usbd_GetEvents(const Ft232Usbd *self, Ft232UsbdEvents *events);
 
 /* 通道 A OUT 数据就是裸 MPSSE，Peek 后必须整包 Consume；未消费时 EP2 保持 NAK。
- * MpsseTxWrite 接受 1..62 字节裸回复，在本层补 31 60 后复制进 USB PMA。
+ * Peek 的 data=NULL 表示无包；data 非空、长度为零则是 OUT ZLP。
+ * MpsseTxWrite 借用至多两段共 1..62 字节裸回复，补 31 60 后复制进 PMA。
  * 返回 OK 后调用方即可释放源数据；此写接口不接受空回复。
  */
 uint16_t Ft232Usbd_MpsseRxPeek(const Ft232Usbd *self, const uint8_t **data);
 void Ft232Usbd_MpsseRxConsume(const Ft232Usbd *self);
 Ft232UsbdResult Ft232Usbd_MpsseTxWrite(const Ft232Usbd *self,
-                                       const uint8_t *data,
-                                       uint16_t length);
+                                       const uint8_t *head, uint16_t head_length,
+                                       const uint8_t *tail, uint16_t tail_length);
 
 /* 通道 B 只提供独立的原始 FTDI 数据面；UART 引脚和收发器尚未由板级配置指定，
  * 因而本模块不擅自消费数据，也不伪造 UART 状态。
@@ -145,12 +145,13 @@ Ft232UsbdResult Ft232Usbd_AuxTxWrite(const Ft232Usbd *self,
                                      const uint8_t *data,
                                      uint16_t length);
 
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 /* CDC 只向转发服务发布裸字节邮箱。USB 中断拥有生产端，主循环消费后才
  * 重新 VALID EP6；EP7 写入完成前返回 TX_BUSY。
  */
 void Ft232Usbd_CdcDataEnable(const Ft232Usbd *self);
 uint8_t Ft232Usbd_CdcIsReady(const Ft232Usbd *self);
+uint8_t Ft232Usbd_CdcIsOpen(const Ft232Usbd *self);
 Ft232UsbdCdcFault Ft232Usbd_CdcGetFault(const Ft232Usbd *self);
 uint16_t Ft232Usbd_CdcRxPeek(const Ft232Usbd *self, const uint8_t **data);
 void Ft232Usbd_CdcRxConsume(const Ft232Usbd *self);

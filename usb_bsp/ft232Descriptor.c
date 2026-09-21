@@ -86,7 +86,7 @@ const uint8_t FtdiUsbConfigurationDescriptor[FTDI_USB_CONFIG_DESC_SIZE]
     USB_U16_HIGH(FTDI_USB_BULK_PACKET_SIZE),
     0x00U,
 
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
     /* IAD 把接口 2/3 明确归为一个 CDC ACM 功能，同时保留前两个 FTDI
      * vendor interface 的编号和端点不变。
      */
@@ -242,7 +242,7 @@ _Static_assert(FTDI_USB_MS_OS_20_DESC_SIZE ==
 _Static_assert(FTDI_USB_SERIAL_DESC_SIZE ==
                    (2U + (2U * (10U + FTDI_USB_BUILD_SERIAL_SUFFIX_LENGTH))),
                "FTDI serial descriptor size must match its generated suffix");
-#if UART_FORWARD_ENABLED != 0U
+#if USB_CDC_ENABLED != 0U
 _Static_assert(FTDI_USB_CDC_DATA_PACKET_SIZE == 16U,
                "CDC PMA allocation is sized for 16-byte bulk packets");
 #endif

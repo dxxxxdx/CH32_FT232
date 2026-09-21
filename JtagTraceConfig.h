@@ -1,0 +1,8 @@
+#ifndef CH32_JTAG_TRACE_CONFIG_H
+#define CH32_JTAG_TRACE_CONFIG_H
+
+#ifndef JTAG_ACM_TRACE_ENABLED
+#define JTAG_ACM_TRACE_ENABLED (0U)
+#endif
+
+#endif

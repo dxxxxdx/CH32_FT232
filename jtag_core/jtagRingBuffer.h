@@ -18,7 +18,7 @@ typedef struct
     void (*write)(const JtagRingBuffer *self,
                   const uint8_t *data,
                   uint16_t length);
-    uint16_t (*peek)(const JtagRingBuffer *self, const uint8_t **data);
+    uint16_t (*peek)(const JtagRingBuffer *self, uint16_t offset, const uint8_t **data);
     void (*consume)(const JtagRingBuffer *self, uint16_t length);
 } JtagRingBufferOps;
 

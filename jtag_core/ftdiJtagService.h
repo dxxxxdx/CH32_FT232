@@ -10,12 +10,10 @@ typedef struct
 {
     const MpssePort *port;
     const JTAGManager *jtag;
-    uint32_t clock_budget;
 } FtdiJtagServiceConfig;
 
 typedef struct
 {
-    uint32_t rx_last_packet_at;
     uint8_t seen_bus_reset;
     uint8_t seen_sio_reset;
     uint8_t seen_host_rx_purge;
@@ -23,7 +21,7 @@ typedef struct
     volatile uint8_t last_result;
     volatile uint8_t sticky_fault;
     /* 批次调度只归service所有；长度/内容/解析状态仍只存于manager。 */
-    uint8_t rx_batch_ready;
+    uint8_t rx_phase;
 } FtdiJtagServiceState;
 
 _Static_assert(sizeof(FtdiJtagServiceState) <= 12U,
@@ -37,21 +35,16 @@ typedef struct
 
 #define FTDI_JTAG_SERVICE_FLASH __attribute__((section(".rodata.ftdi_jtag")))
 
-/* 组合根在文件作用域装配 port 与 JTAG 核。clock_budget 限制普通路径的单轮占用，
- * Gowin 擦除原子路径例外；它不参与 TCK 分频，主机 0x86 始终丢弃。
- */
-#define FTDI_JTAG_SERVICE_DEFINE(name, port_object, jtag_object, budget)          \
-    _Static_assert((budget) >= (MPSSE_PORT_RX_PACKET_SIZE * 8U),                  \
-                   "JTAG service budget must cover one complete USB packet");  \
+/* 批次由 service 唯一调度；解析器不再通过时钟预算切断一批 GPIO 输出。 */
+#define FTDI_JTAG_SERVICE_DEFINE(name, port_object, jtag_object)                \
     static const FtdiJtagServiceConfig name##_config FTDI_JTAG_SERVICE_FLASH = { \
-        .port = &(port_object),                                                   \
-        .jtag = &(jtag_object),                                                   \
-        .clock_budget = (budget)                                                  \
-    };                                                                            \
-    static FtdiJtagServiceState name##_state;                                     \
-    static const FtdiJtagService name FTDI_JTAG_SERVICE_FLASH = {                 \
-        .config = &name##_config,                                                  \
-        .state = &name##_state                                                     \
+        .port = &(port_object),                                                \
+        .jtag = &(jtag_object)                                                 \
+    };                                                                        \
+    static FtdiJtagServiceState name##_state;                                   \
+    static const FtdiJtagService name FTDI_JTAG_SERVICE_FLASH = {                \
+        .config = &name##_config,                                              \
+        .state = &name##_state                                                 \
     }
 
 typedef enum
@@ -62,7 +55,8 @@ typedef enum
     FTDI_JTAG_SERVICE_BACKPRESSURE,
     FTDI_JTAG_SERVICE_PORT_RX_LENGTH_FAULT,
     FTDI_JTAG_SERVICE_PORT_RX_OVERWRITE_FAULT,
-    FTDI_JTAG_SERVICE_MPSSE_FAULT
+    FTDI_JTAG_SERVICE_TX_OVERFLOW,
+    FTDI_JTAG_SERVICE_SEQUENCE_FAULT
 } FtdiJtagServiceResult;
 
 /* Init 必须在 GPIO 模式和初始电平配置完成之后、进入主循环之前调用。 */

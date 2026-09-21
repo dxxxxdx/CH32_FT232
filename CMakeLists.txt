@@ -56,35 +56,27 @@ set(LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/Ld/Link.ld")
 set(GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(FTDI_USB_SERIAL_HEADER "${GENERATED_INCLUDE_DIR}/ftdiUsbBuildSerial.h")
 
-# 当前这批固件统一给 20PINOUT 板使用。FORCE 会覆盖 IDE 旧构建目录中
-# 残留的 DEFAULT 缓存，恢复多板构建时再去掉 FORCE。
-set(BOARD_TYPE "20PINOUT" CACHE STRING "Board type: DEFAULT or 20PINOUT" FORCE)
-set_property(CACHE BOARD_TYPE PROPERTY STRINGS DEFAULT 20PINOUT)
-string(TOUPPER "${BOARD_TYPE}" BOARD_TYPE_NORMALIZED)
+# 当前分支固定使用 22PINOUT；覆盖旧构建目录的板型缓存，防止沿用旧引脚。
+set(BOARD_TYPE "22PINOUT" CACHE STRING "Fixed board: 22PINOUT" FORCE)
+set_property(CACHE BOARD_TYPE PROPERTY STRINGS 22PINOUT)
+set(BOARD_DEFINITION BOARD_22PINOUT=1U)
+message(STATUS "Board type = 22PINOUT (fixed)")
 
-set(BOARD_DEFINITION "")
-if(BOARD_TYPE_NORMALIZED STREQUAL "DEFAULT")
-    message(STATUS "Board type = DEFAULT")
-elseif(BOARD_TYPE_NORMALIZED STREQUAL "20PINOUT")
-    set(BOARD_DEFINITION BOARD_20PINOUT=1U)
-    message(STATUS "Board type = 20PINOUT")
-else()
-    message(FATAL_ERROR "BOARD_TYPE must be DEFAULT or 20PINOUT, got: ${BOARD_TYPE}")
-endif()
+# 22PINOUT 没有运行灯，旧缓存中的 ON 也必须关闭，避免误配置灯脚。
+set(RUN_LED_ENABLE OFF CACHE BOOL "22PINOUT has no run LED" FORCE)
+set(RUN_LED_DEFINITION RUN_LED_ENABLED=0U)
+message(STATUS "Run LED = DISABLED (22PINOUT has no run LED)")
 
-# 无状态灯的板子关闭后不会实例化 LED，也不会配置任何 LED GPIO。
-option(RUN_LED_ENABLE "Enable the default PB0 run LED" ON)
-if(RUN_LED_ENABLE)
-    set(RUN_LED_DEFINITION RUN_LED_ENABLED=1U)
-else()
-    set(RUN_LED_DEFINITION RUN_LED_ENABLED=0U)
-endif()
-
-# UART 转发默认使用 20PINOUT 板的 PB6/PB7；需要纯 FT2232/JTAG 固件时
+# UART 转发默认使用 22PINOUT 板的 PB6/PB7；需要纯 FT2232/JTAG 固件时
 # 可显式传 DISABLED，主循环入口保持不变，由服务头提供空实现。
+option(JTAG_ACM_TRACE "Use CDC ACM exclusively for deferred JTAG diagnostics" OFF)
 set(UART_FORWARD_PORT_SELECT "PB67" CACHE STRING
-        "UART forwarding: DISABLED, PA23 or PB67")
-set_property(CACHE UART_FORWARD_PORT_SELECT PROPERTY STRINGS DISABLED PA23 PB67)
+        "UART forwarding: DISABLED or PB67")
+set_property(CACHE UART_FORWARD_PORT_SELECT PROPERTY STRINGS DISABLED PB67)
+if(JTAG_ACM_TRACE)
+    set(UART_FORWARD_PORT_SELECT "DISABLED")
+    message(STATUS "JTAG ACM trace = ON; CDC reserved for diagnostics")
+endif()
 
 set(UART_FORWARD_PORT_DEFINITION "")
 set(UART_FORWARD_BUILD_ENABLED ON)
@@ -96,19 +88,14 @@ if(UART_FORWARD_PORT_NORMALIZED STREQUAL "" OR
     set(UART_FORWARD_BUILD_ENABLED OFF)
     message(STATUS "UART forwarding = DISABLED")
 elseif(UART_FORWARD_PORT_NORMALIZED STREQUAL "PA23")
-    if(BOARD_TYPE_NORMALIZED STREQUAL "20PINOUT")
-        message(FATAL_ERROR "20PINOUT UART forwarding only supports PB67")
-    endif()
-    set(UART_FORWARD_PORT_DEFINITION
-            UART_FORWARD_PORT=UART_FORWARD_PORT_PA23)
-    message(STATUS "UART forwarding port = PA23 (default)")
+    message(FATAL_ERROR "22PINOUT UART forwarding only supports PB67 or DISABLED")
 elseif(UART_FORWARD_PORT_NORMALIZED STREQUAL "PB67")
     set(UART_FORWARD_PORT_DEFINITION
             UART_FORWARD_PORT=UART_FORWARD_PORT_PB67)
     message(STATUS "UART forwarding port = PB67")
 else()
     message(FATAL_ERROR
-            "UART_FORWARD_PORT_SELECT must be DISABLED, PA23 or PB67, got: ${UART_FORWARD_PORT_SELECT}")
+            "UART_FORWARD_PORT_SELECT must be DISABLED or PB67, got: ${UART_FORWARD_PORT_SELECT}")
 endif()
 
 if(NOT EXISTS "${LINKER_SCRIPT}")
@@ -187,10 +174,17 @@ foreach(_source_list PROJECT_C_SOURCES PROJECT_CXX_SOURCES PROJECT_ASM_SOURCES)
     list(FILTER ${_source_list} EXCLUDE REGEX ".*/CMakeFiles/.*")
     # 主机回归包含模拟寄存器和独立 main，不能混入 MCU 固件。
     list(FILTER ${_source_list} EXCLUDE REGEX ".*/tests/.*")
+    # 日志中的源码快照与独立直驱诊断有自己的入口，不能链接到正常固件。
+    list(FILTER ${_source_list} EXCLUDE REGEX ".*/logs/.*")
+    list(FILTER ${_source_list} EXCLUDE REGEX ".*/firmware-[^/]*/.*")
+    list(FILTER ${_source_list} EXCLUDE REGEX ".*/host_tools/.*")
+    list(FILTER ${_source_list} EXCLUDE REGEX ".*/diagnostics/gw1n9_direct/.*")
 endforeach()
 
 if(NOT UART_FORWARD_BUILD_ENABLED)
     list(FILTER PROJECT_C_SOURCES EXCLUDE REGEX ".*/uart_forward/.*\\.c$")
+endif()
+if(NOT UART_FORWARD_BUILD_ENABLED AND NOT JTAG_ACM_TRACE)
     list(FILTER PROJECT_C_SOURCES EXCLUDE REGEX ".*/usb_bsp/ft232CdcPort\\.c$")
 endif()
 
@@ -200,7 +194,8 @@ add_executable(${TARGET_NAME}
         ${PROJECT_C_SOURCES}
         ${PROJECT_CXX_SOURCES}
         ${PROJECT_ASM_SOURCES}
-        boardtype/20pinout.h
+        boardtype/22pinout.h
+        boardtype/BoardConfig.h
 )
 
 # 该 target 没有 OUTPUT，因此每次构建都会重新生成秒级 UTC 序列号。
@@ -215,6 +210,8 @@ add_custom_target(ftdi_usb_serial_header ALL
 )
 add_dependencies(${TARGET_NAME} ftdi_usb_serial_header)
 set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/usb_bsp/ft232Descriptor.c"
+        APPEND PROPERTY OBJECT_DEPENDS "${FTDI_USB_SERIAL_HEADER}")
+set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/diagnostics/jtagTrace.c"
         APPEND PROPERTY OBJECT_DEPENDS "${FTDI_USB_SERIAL_HEADER}")
 
 set_target_properties(${TARGET_NAME} PROPERTIES
@@ -245,6 +242,10 @@ list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/cmake-build[^/]*/.*")
 list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/build[^/]*/.*")
 list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/CMakeFiles/.*")
 list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/tests/.*")
+list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/logs/.*")
+list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/firmware-[^/]*/.*")
+list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/host_tools/.*")
+list(FILTER PROJECT_HEADERS EXCLUDE REGEX ".*/diagnostics/gw1n9_direct/.*")
 
 set(PROJECT_HEADER_DIRS "")
 foreach(_header ${PROJECT_HEADERS})
@@ -263,6 +264,7 @@ target_compile_definitions(${TARGET_NAME} PRIVATE
         ${BOARD_DEFINITION}
         ${UART_FORWARD_PORT_DEFINITION}
         ${RUN_LED_DEFINITION}
+        JTAG_ACM_TRACE_ENABLED=$<BOOL:${JTAG_ACM_TRACE}>
 )
 
 # =========================================================================

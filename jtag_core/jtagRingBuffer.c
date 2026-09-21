@@ -13,6 +13,7 @@ static void jtag_ring_write(const JtagRingBuffer *self,
                             const uint8_t *data,
                             uint16_t length);
 static uint16_t jtag_ring_peek(const JtagRingBuffer *self,
+                               uint16_t offset,
                                const uint8_t **data);
 static void jtag_ring_consume(const JtagRingBuffer *self, uint16_t length);
 
@@ -80,28 +81,31 @@ static void jtag_ring_write(const JtagRingBuffer *const self,
 }
 
 static uint16_t jtag_ring_peek(const JtagRingBuffer *const self,
+                               uint16_t offset,
                                const uint8_t **const data)
 {
     uint16_t contiguous;
+    uint16_t position;
 
-    if (self->state->used == 0U)
+    if (offset >= self->state->used)
     {
         *data = (const uint8_t *)0;
         return 0U;
     }
 
-    contiguous = (uint16_t)(self->mask + 1U - self->state->read_pos);
-    if (contiguous > self->state->used)
+    position = (uint16_t)((self->state->read_pos + offset) & self->mask);
+    contiguous = (uint16_t)(self->mask + 1U - position);
+    if (contiguous > self->state->used - offset)
     {
-        contiguous = self->state->used;
+        contiguous = (uint16_t)(self->state->used - offset);
     }
-    *data = &self->data[self->state->read_pos];
+    *data = &self->data[position];
     return contiguous;
 }
 
 static void jtag_ring_consume(const JtagRingBuffer *const self, uint16_t length)
 {
-    /* length 来自最近一次 Peek，由上层维持不越界的内部契约。 */
+    /* length 来自从读位置连续借用的一至两段，由上层维持不越界契约。 */
     self->state->read_pos =
         (uint16_t)((self->state->read_pos + length) & self->mask);
     self->state->used = (uint16_t)(self->state->used - length);

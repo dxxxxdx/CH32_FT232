@@ -1,7 +1,6 @@
 #include "ft232MpssePort.h"
 
 #include "ft232Usbd.h"
-#include "SystemTimebase.h"
 #include "JtagGpioInterrupt.h"
 
 #define FT232_MPSSE_PORT_FLASH \
@@ -21,12 +20,9 @@ static uint16_t ft232_mpsse_rx_peek(const MpssePort *self,
                                     const uint8_t **data);
 static void ft232_mpsse_rx_consume(const MpssePort *self);
 static MpssePortResult ft232_mpsse_tx_write(const MpssePort *self,
-                                            const uint8_t *data,
-                                            uint16_t length);
+                                            const uint8_t *head, uint16_t head_length,
+                                            const uint8_t *tail, uint16_t tail_length);
 static uint8_t ft232_mpsse_interrupt_lock(const MpssePort *self);
-static uint32_t ft232_mpsse_time_now(const MpssePort *self);
-static uint8_t ft232_mpsse_time_elapsed(const MpssePort *self,
-                                       uint32_t start, uint16_t ms);
 static void ft232_mpsse_interrupt_unlock(const MpssePort *self,
                                          uint8_t token);
 
@@ -38,8 +34,6 @@ static const MpssePortOps ft232_mpsse_ops FT232_MPSSE_PORT_FLASH = {
     .rx_peek = ft232_mpsse_rx_peek,
     .rx_consume = ft232_mpsse_rx_consume,
     .tx_write = ft232_mpsse_tx_write,
-    .time_now = ft232_mpsse_time_now,
-    .time_elapsed = ft232_mpsse_time_elapsed,
     .interrupt_lock = ft232_mpsse_interrupt_lock,
     .interrupt_unlock = ft232_mpsse_interrupt_unlock
 };
@@ -108,11 +102,12 @@ static void ft232_mpsse_rx_consume(const MpssePort *const self)
 }
 
 static MpssePortResult ft232_mpsse_tx_write(const MpssePort *const self,
-                                            const uint8_t *const data,
-                                            uint16_t length)
+                                            const uint8_t *const head, uint16_t head_length,
+                                            const uint8_t *const tail, uint16_t tail_length)
 {
     const Ft232UsbdResult result =
-        Ft232Usbd_MpsseTxWrite(ft232_mpsse_usbd(self), data, length);
+        Ft232Usbd_MpsseTxWrite(ft232_mpsse_usbd(self),
+                              head, head_length, tail, tail_length);
 
     switch (result)
     {
@@ -142,18 +137,4 @@ static void ft232_mpsse_interrupt_unlock(const MpssePort *const self,
 {
     (void)self;
     JtagGpioInterrupt_Restore(token);
-}
-
-static uint32_t ft232_mpsse_time_now(const MpssePort *const self)
-{
-    (void)self;
-    return SystemTimebase_Now(&SystemTimebase0);
-}
-
-static uint8_t ft232_mpsse_time_elapsed(const MpssePort *const self,
-                                       uint32_t start, uint16_t ms)
-{
-    const uint32_t ticks = (SystemCoreClock / 1000U) * ms;
-
-    return ((uint32_t)(ft232_mpsse_time_now(self) - start) >= ticks) ? 1U : 0U;
 }

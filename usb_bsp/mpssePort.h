@@ -40,14 +40,12 @@ typedef struct
     void (*service)(const MpssePort *self);
     uint8_t (*is_configured)(const MpssePort *self);
     void (*get_events)(const MpssePort *self, MpssePortEvents *events);
+    /* data=NULL 表示无包；data 非空且 length=0 表示真实 OUT ZLP。 */
     uint16_t (*rx_peek)(const MpssePort *self, const uint8_t **data);
     void (*rx_consume)(const MpssePort *self);
     MpssePortResult (*tx_write)(const MpssePort *self,
-                                const uint8_t *data,
-                                uint16_t length);
-    /* 运行时只读时基；无符号差值由BSP换算，避免低字先除频的回绕错误。 */
-    uint32_t (*time_now)(const MpssePort *self);
-    uint8_t (*time_elapsed)(const MpssePort *self, uint32_t start, uint16_t ms);
+                                const uint8_t *head, uint16_t head_length,
+                                const uint8_t *tail, uint16_t tail_length);
     /* GPIO执行期屏蔽可屏蔽中断，token必须恢复进入前状态。 */
     uint8_t (*interrupt_lock)(const MpssePort *self);
     void (*interrupt_unlock)(const MpssePort *self, uint8_t token);
